@@ -81,6 +81,7 @@ class PipelineRequest(BaseModel):
 # ─────────────────────────────────────────
 class MovieManagerRequest(BaseModel):
     s3_folder_path: str  # S3 폴더 경로 (예: "s3://bucket/videos/")
+    characters_info: str  # 등장인물 정보 (자유 형식 문자열)
     language_code: str = "ko-KR"
     threshold: float = 30.0
 

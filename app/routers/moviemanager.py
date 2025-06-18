@@ -20,6 +20,7 @@ async def moviemanager_endpoint(req: MovieManagerRequest):
     try:
         result = await process_videos_from_folder(
             s3_folder_path=req.s3_folder_path,
+            characters_info=req.characters_info,
             language_code=req.language_code,
             threshold=req.threshold
         )
