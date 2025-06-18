@@ -72,9 +72,9 @@ def get_video_files_from_s3_folder(s3_folder_path: str) -> List[str]:
     except Exception as e:
         raise RuntimeError(f"S3 폴더 조회 중 오류 발생: {str(e)}")
 
-def create_claude_prompt_with_context(utterances: List[Dict], scene_images: List[Dict], previous_summaries: List[str] = None) -> str:
+def create_claude_prompt_with_context(utterances: List[Dict], scene_images: List[Dict], previous_summaries: List[str] = None, current_video_index: int = 0) -> str:
     """
-    이전 요약들을 포함하여 Claude 프롬프트를 생성합니다.
+    Rolling Context 기법으로 최근 3개 비디오 요약만 포함하여 Claude 프롬프트를 생성합니다.
     """
     conversation = "\n".join([
         f"[{utterance['speaker']}] {utterance['text']}"
@@ -86,21 +86,27 @@ def create_claude_prompt_with_context(utterances: List[Dict], scene_images: List
         for i, scene in enumerate(scene_images)
     ])
     
-    # 이전 요약들을 컨텍스트로 추가
+    # Rolling Context: 최근 3개 비디오 요약만 사용
     context = ""
     if previous_summaries:
-        context = "\n\n[이전 영상들의 줄거리]\n" + "\n\n".join([
-            f"영상 {i+1}: {summary}" 
-            for i, summary in enumerate(previous_summaries)
+        # 최근 3개만 선택 (현재 비디오 직전 3개)
+        recent_summaries = previous_summaries[-3:]
+        start_index = max(0, current_video_index - len(recent_summaries))
+        
+        context = "\n\n[최근 영상들의 줄거리]\n" + "\n\n".join([
+            f"영상 {start_index + i + 1}: {summary}" 
+            for i, summary in enumerate(recent_summaries)
         ]) + "\n\n"
+        
+        print(f"📚 Rolling Context: 최근 {len(recent_summaries)}개 영상의 요약을 컨텍스트로 사용 (영상 {start_index + 1}~{current_video_index})")
     
-    prompt = f"""다음은 연속된 비디오 시리즈의 일부입니다.{context}[현재 영상의 대화 내용]\n{conversation}\n\n[현재 영상의 장면별 시작 시각]\n{scene_times}\n\n이전 영상들의 맥락을 고려하여 현재 영상에 대해:\n1. 각 장면이 보여주는 상황을 설명해주세요\n2. 대화 내용과 연관지어 설명해주세요\n3. 이전 영상들과의 연결점이나 스토리 진행을 분석해주세요\n\n현재 영상의 내용을 요약해주세요."""
+    prompt = f"""다음은 연속된 비디오 시리즈의 일부입니다.{context}[현재 영상의 대화 내용]\n{conversation}\n\n[현재 영상의 장면별 시작 시각]\n{scene_times}\n\n최근 영상들의 맥락을 고려하여 현재 영상에 대해:\n1. 각 장면이 보여주는 상황을 설명해주세요\n2. 대화 내용과 연관지어 설명해주세요\n3. 최근 영상들과의 연결점이나 스토리 진행을 분석해주세요\n\n현재 영상의 내용을 요약해주세요."""
     
     return prompt
 
-async def get_bedrock_response_with_context(utterances: List[Dict], scene_images: List[Dict], previous_summaries: List[str] = None) -> str:
+async def get_bedrock_response_with_context(utterances: List[Dict], scene_images: List[Dict], previous_summaries: List[str] = None, current_video_index: int = 0) -> str:
     """
-    이전 요약들을 컨텍스트로 포함하여 Bedrock Claude 응답을 생성합니다.
+    Rolling Context 기법으로 최근 3개 비디오 요약만 컨텍스트로 포함하여 Bedrock Claude 응답을 생성합니다.
     """
     bedrock = boto3.client(
         service_name='bedrock-runtime',
@@ -108,8 +114,8 @@ async def get_bedrock_response_with_context(utterances: List[Dict], scene_images
     )
     model_id = os.getenv("CLAUDE_MODEL_ID")
 
-    # 텍스트 프롬프트 생성 (이전 요약 포함)
-    text_prompt = create_claude_prompt_with_context(utterances, scene_images, previous_summaries)
+    # 텍스트 프롬프트 생성 (Rolling Context 적용)
+    text_prompt = create_claude_prompt_with_context(utterances, scene_images, previous_summaries, current_video_index)
     
     # 디버깅: 프롬프트 출력
     print("=" * 80)
@@ -247,8 +253,8 @@ async def process_videos_from_folder(s3_folder_path: str, language_code: str = "
                 for scene in scenes
             ]
             
-            # 이전 요약들을 컨텍스트로 포함하여 현재 비디오 요약 생성
-            summary = await get_bedrock_response_with_context(utterances, scene_images, previous_summaries)
+            # Rolling Context를 적용하여 현재 비디오 요약 생성
+            summary = await get_bedrock_response_with_context(utterances, scene_images, previous_summaries, i)
             
             video_summaries.append({
                 "video_uri": video_uri,
