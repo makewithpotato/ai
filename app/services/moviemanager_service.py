@@ -1,10 +1,76 @@
 import os
 import json
 import boto3
+import re
 from typing import List, Dict
 from app.services.transcribe_service import transcribe_video
 from app.services.scene_service import get_video_scenes
 import asyncio
+
+def natural_sort_key(s: str) -> List:
+    """
+    자연스러운 정렬을 위한 키 함수
+    숫자가 포함된 문자열을 올바른 순서로 정렬합니다.
+    예: video_1.mp4, video_2.mp4, ..., video_10.mp4
+    """
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
+
+def get_video_files_from_s3_folder(s3_folder_path: str) -> List[str]:
+    """
+    S3 폴더에서 비디오 파일들을 찾아서 정렬된 URI 리스트를 반환합니다.
+    """
+    if not s3_folder_path.startswith("s3://"):
+        raise ValueError("s3_folder_path는 's3://'로 시작해야 합니다.")
+    
+    # S3 폴더 경로 파싱
+    path_parts = s3_folder_path.replace("s3://", "").split("/")
+    bucket = path_parts[0]
+    prefix = "/".join(path_parts[1:])
+    
+    # 마지막이 /로 끝나지 않으면 추가
+    if prefix and not prefix.endswith("/"):
+        prefix += "/"
+    
+    s3 = boto3.client('s3')
+    
+    try:
+        # S3 폴더 내 모든 객체 조회
+        response = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
+        
+        if 'Contents' not in response:
+            raise ValueError(f"S3 폴더가 비어있거나 존재하지 않습니다: {s3_folder_path}")
+        
+        # 비디오 파일 확장자 필터링
+        video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm']
+        video_files = []
+        
+        for obj in response['Contents']:
+            key = obj['Key']
+            # 폴더 자체는 제외 (키가 /로 끝나는 경우)
+            if key.endswith('/'):
+                continue
+                
+            # 비디오 파일인지 확인
+            file_extension = os.path.splitext(key)[1].lower()
+            if file_extension in video_extensions:
+                video_uri = f"s3://{bucket}/{key}"
+                video_files.append(video_uri)
+        
+        if not video_files:
+            raise ValueError(f"S3 폴더에 비디오 파일이 없습니다: {s3_folder_path}")
+        
+        # 자연스러운 정렬 (숫자를 고려한 정렬)
+        # 예: video_1.mp4, video_2.mp4, ..., video_10.mp4 순서로 정렬
+        video_files.sort(key=natural_sort_key)
+        
+        print(f"📁 S3 폴더에서 {len(video_files)}개의 비디오 파일을 발견했습니다:")
+        for i, video_file in enumerate(video_files):
+            print(f"   {i+1}. {video_file}")
+        
+        return video_files
+        
+    except Exception as e:
+        raise RuntimeError(f"S3 폴더 조회 중 오류 발생: {str(e)}")
 
 def create_claude_prompt_with_context(utterances: List[Dict], scene_images: List[Dict], previous_summaries: List[str] = None) -> str:
     """
@@ -40,7 +106,7 @@ async def get_bedrock_response_with_context(utterances: List[Dict], scene_images
         service_name='bedrock-runtime',
         region_name=os.getenv("AWS_DEFAULT_REGION")
     )
-    model_id = os.getenv("BEDROCK_MODEL_ID")
+    model_id = os.getenv("CLAUDE_MODEL_ID")
 
     # 텍스트 프롬프트 생성 (이전 요약 포함)
     text_prompt = create_claude_prompt_with_context(utterances, scene_images, previous_summaries)
@@ -100,9 +166,9 @@ async def create_final_summary(video_summaries: List[str]) -> str:
     """
     bedrock = boto3.client(
         service_name='bedrock-runtime',
-        region_name=os.getenv("AWS_DEFAULT_REGION") or "us-east-1"
+        region_name=os.getenv("AWS_DEFAULT_REGION")
     )
-    model_id = os.getenv("BEDROCK_MODEL_ID") or "anthropic.claude-3-sonnet-20240229-v1:0"
+    model_id = os.getenv("CLAUDE_MODEL_ID")
 
     # 모든 요약을 하나로 합침
     all_summaries = "\n\n".join([
@@ -150,19 +216,22 @@ async def create_final_summary(video_summaries: List[str]) -> str:
     
     return final_response
 
-async def process_multiple_videos(s3_video_uris: List[str], language_code: str = "ko-KR", threshold: float = 30.0) -> Dict:
+async def process_videos_from_folder(s3_folder_path: str, language_code: str = "ko-KR", threshold: float = 30.0) -> Dict:
     """
-    여러 비디오를 순차적으로 처리하여 각각의 요약과 최종 요약을 생성합니다.
+    S3 폴더에서 비디오 파일들을 찾아 순차적으로 처리하여 각각의 요약과 최종 요약을 생성합니다.
     """
     try:
+        # S3 폴더에서 비디오 파일들 조회
+        video_uris = get_video_files_from_s3_folder(s3_folder_path)
+        
         video_summaries = []
         previous_summaries = []
         
-        print(f"🎥 총 {len(s3_video_uris)}개의 비디오를 순차적으로 처리합니다.")
+        print(f"🎥 총 {len(video_uris)}개의 비디오를 순차적으로 처리합니다.")
         print("=" * 80)
         
-        for i, video_uri in enumerate(s3_video_uris):
-            print(f"🎬 [{i+1}/{len(s3_video_uris)}] 비디오 처리 시작: {video_uri}")
+        for i, video_uri in enumerate(video_uris):
+            print(f"🎬 [{i+1}/{len(video_uris)}] 비디오 처리 시작: {video_uri}")
             
             # transcribe와 scene 병렬 처리
             transcribe_task = asyncio.to_thread(transcribe_video, video_uri, language_code)
@@ -190,7 +259,7 @@ async def process_multiple_videos(s3_video_uris: List[str], language_code: str =
             # 다음 비디오 처리를 위해 이전 요약에 추가
             previous_summaries.append(summary)
             
-            print(f"✅ [{i+1}/{len(s3_video_uris)}] 비디오 처리 완료")
+            print(f"✅ [{i+1}/{len(video_uris)}] 비디오 처리 완료")
             print("=" * 80)
         
         print("🎭 최종 종합 요약 생성 중...")
@@ -207,4 +276,4 @@ async def process_multiple_videos(s3_video_uris: List[str], language_code: str =
         
     except Exception as e:
         print(f"❌ 오류 발생: {str(e)}")
-        raise RuntimeError(f"다중 비디오 처리 중 오류 발생: {str(e)}") 
+        raise RuntimeError(f"S3 폴더 비디오 처리 중 오류 발생: {str(e)}")

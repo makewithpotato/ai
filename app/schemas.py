@@ -80,7 +80,7 @@ class PipelineRequest(BaseModel):
 # 7) MovieManager 요청/응답
 # ─────────────────────────────────────────
 class MovieManagerRequest(BaseModel):
-    s3_video_uris: List[str]  # 여러 개의 S3 비디오 URI 리스트
+    s3_folder_path: str  # S3 폴더 경로 (예: "s3://bucket/videos/")
     language_code: str = "ko-KR"
     threshold: float = 30.0
 
