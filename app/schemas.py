@@ -40,7 +40,7 @@ class SceneInfo(BaseModel):
     end_time: float
     start_frame: int
     end_frame: int
-    frame_url: str  # S3 presigned URL
+    frame_image: str  # base64 encoded image
 
 class SceneResponse(BaseModel):
     scenes: List[SceneInfo]
@@ -57,3 +57,38 @@ class CombinedRequest(BaseModel):
 class CombinedResponse(BaseModel):
     claude_response: str
     transcript: str
+
+# ─────────────────────────────────────────
+# 5) Summarize 관련 요청/응답
+# ─────────────────────────────────────────
+class SummarizeRequest(BaseModel):
+    utterances: List[UtteranceResponse]  # STT 결과
+    scene_images: List[dict]  # {"start_time": float, "image": str} 형태로 전달
+
+class SummarizeResponse(BaseModel):
+    summary: str  # Claude의 요약 응답
+
+# ─────────────────────────────────────────
+# 6) Pipeline 요청/응답
+# ─────────────────────────────────────────
+class PipelineRequest(BaseModel):
+    s3_video_uri: str
+    language_code: str = "ko-KR"
+    threshold: float = 30.0
+
+# ─────────────────────────────────────────
+# 7) MovieManager 요청/응답
+# ─────────────────────────────────────────
+class MovieManagerRequest(BaseModel):
+    s3_video_uris: List[str]  # 여러 개의 S3 비디오 URI 리스트
+    language_code: str = "ko-KR"
+    threshold: float = 30.0
+
+class VideoSummary(BaseModel):
+    video_uri: str
+    summary: str
+    order: int  # 처리 순서
+
+class MovieManagerResponse(BaseModel):
+    video_summaries: List[VideoSummary]  # 각 비디오별 요약
+    final_summary: str  # 전체 영상에 대한 최종 요약

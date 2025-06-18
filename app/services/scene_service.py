@@ -83,9 +83,10 @@ def save_frame_to_s3(frame: np.ndarray, prefix: str = "scenes") -> str:
         # 임시 파일 삭제
         os.unlink(temp_file.name)
 
-def detect_scenes(video_path: str, threshold: float = 30.0) -> List[Dict]:
+def detect_scenes(video_path: str, threshold: float = 30.0, max_scenes_count: int = 20) -> List[Dict]:
     """
-    비디오에서 주요 장면을 감지하고 각 장면의 대표 프레임을 S3에 업로드합니다.
+    비디오에서 주요 장면을 감지하고 각 장면의 대표 프레임을 base64로 반환합니다.
+    장면이 20개 초과일 경우, 시간별로 균일하게 분포하도록 최대 20개로 제한합니다.
     """
     # 장면 감지
     scene_list = detect(video_path, ContentDetector(threshold=threshold))
@@ -102,28 +103,37 @@ def detect_scenes(video_path: str, threshold: float = 30.0) -> List[Dict]:
         ret, frame = cap.read()
         
         if ret:
-            # 프레임을 S3에 업로드하고 URL 받기
-            frame_url = save_frame_to_s3(frame)
-            
+            # 프레임을 base64로 변환
+            frame_image = frame_to_base64(frame)
             scenes.append({
                 "start_time": scene[0].get_seconds(),
                 "end_time": scene[1].get_seconds(),
                 "start_frame": scene[0].frame_num,
                 "end_frame": scene[1].frame_num,
-                "frame_url": frame_url
+                "frame_image": frame_image
             })
-    
     cap.release()
+
+    # 장면이 20개 초과일 경우, 시간별로 균일하게 분포하도록 최대 20개로 제한
+    if len(scenes) > max_scenes_count:
+        total_duration = scenes[-1]["end_time"] - scenes[0]["start_time"]
+        interval = total_duration / max_scenes_count
+        selected_scenes = []
+        for i in range(max_scenes_count):
+            target_time = scenes[0]["start_time"] + i * interval
+            closest_scene = min(scenes, key=lambda x: abs(x["start_time"] - target_time))
+            selected_scenes.append(closest_scene)
+        scenes = selected_scenes
+
     return scenes
 
 def get_video_scenes(s3_uri: str, threshold: float = 30.0) -> List[Dict]:
     """
-    S3에 있는 비디오의 주요 장면을 감지하고 각 장면의 대표 프레임을 S3에 업로드합니다.
+    S3에 있는 비디오의 주요 장면을 감지하고 각 장면의 대표 프레임을 base64로 반환합니다.
     """
     try:
         # S3에서 비디오 다운로드
         video_path = download_video_from_s3(s3_uri)
-        
         try:
             # 장면 감지
             scenes = detect_scenes(video_path, threshold)
