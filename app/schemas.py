@@ -80,7 +80,10 @@ class PipelineRequest(BaseModel):
 # 7) MovieManager 요청/응답
 # ─────────────────────────────────────────
 class MovieManagerRequest(BaseModel):
-    s3_video_uris: List[str]  # 여러 개의 S3 비디오 URI 리스트
+    s3_folder_path: str  # S3 폴더 경로 (예: "s3://bucket/videos/")
+    characters_info: str  # 등장인물 정보 (자유 형식 문자열)
+    movie_id: int  # 영화 ID (데이터베이스 저장용)
+    init: bool = False  # True: 처음부터 시작, False: 마지막 상태부터 재시작
     language_code: str = "ko-KR"
     threshold: float = 30.0
 
@@ -88,7 +91,9 @@ class VideoSummary(BaseModel):
     video_uri: str
     summary: str
     order: int  # 처리 순서
+    summary_id: int  # 데이터베이스 저장된 요약 ID
 
 class MovieManagerResponse(BaseModel):
     video_summaries: List[VideoSummary]  # 각 비디오별 요약
     final_summary: str  # 전체 영상에 대한 최종 요약
+    final_summary_id: int  # 최종 요약의 데이터베이스 ID
