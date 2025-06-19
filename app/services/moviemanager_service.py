@@ -240,6 +240,99 @@ async def get_bedrock_response_with_context(utterances: List[Dict], scene_images
     
     return claude_response
 
+def parse_final_summary(final_summary_text: str) -> Dict[str, str]:
+    """
+    최종 요약에서 줄거리와 평론을 분리합니다.
+    
+    Args:
+        final_summary_text: Claude에서 받은 최종 요약 텍스트
+        
+    Returns:
+        Dict: {"story": "줄거리", "review": "평론"}
+    """
+    try:
+        # ####### 구분자로 분리
+        parts = final_summary_text.split("#######")
+        
+        if len(parts) >= 2:
+            story = parts[0].strip()
+            review = parts[1].strip()
+            
+            print(f"📖 줄거리 추출 완료 (길이: {len(story)} 문자)")
+            print(f"📝 평론 추출 완료 (길이: {len(review)} 문자)")
+            
+            return {
+                "story": story,
+                "review": review
+            }
+        else:
+            # 구분자가 없는 경우 전체를 줄거리로 처리
+            print("⚠️ ####### 구분자를 찾을 수 없어 전체를 줄거리로 처리합니다.")
+            return {
+                "story": final_summary_text.strip(),
+                "review": "평론 정보가 없습니다."
+            }
+            
+    except Exception as e:
+        print(f"❌ 최종 요약 파싱 중 오류: {str(e)}")
+        return {
+            "story": final_summary_text.strip(),
+            "review": "평론 파싱 중 오류가 발생했습니다."
+        }
+
+def collect_thumbnail_info(video_summaries: List[Dict], s3_video_uri: str = None) -> Dict[str, any]:
+    """
+    썸네일 정보를 수집합니다.
+    
+    Args:
+        video_summaries: 비디오 요약 리스트 (썸네일 URL 포함)
+        s3_video_uri: 원본 비디오 URI (단일 비디오 모드용)
+        
+    Returns:
+        Dict: {"folder_uri": str, "urls": List[str]}
+    """
+    thumbnail_urls = []
+    thumbnail_folder_uri = None
+    
+    try:
+        # 각 요약에서 썸네일 URL 수집 (미래에 추가될 수 있음)
+        for summary in video_summaries:
+            if isinstance(summary, dict) and "thumbnail_urls" in summary:
+                thumbnail_urls.extend(summary["thumbnail_urls"])
+        
+        # 단일 비디오 모드인 경우 폴더 URI 생성
+        if s3_video_uri and s3_video_uri.startswith("s3://"):
+            # 원본 비디오 URI에서 썸네일 폴더 경로 생성
+            # 예: s3://bucket/movies/series1/episode1.mp4 → s3://scenes-bucket/movies/series1/thumbnails/
+            uri_parts = s3_video_uri.replace("s3://", "").split("/")
+            
+            if len(uri_parts) > 1:
+                # 디렉토리 부분 추출 (파일명 제외)
+                directory_path = "/".join(uri_parts[1:-1])
+                if directory_path:
+                    # 같은 디렉토리에 thumbnails 폴더 생성
+                    scenes_bucket = os.getenv("SCENES_BUCKET")
+                    if scenes_bucket:
+                        thumbnail_folder_uri = f"s3://{scenes_bucket}/{directory_path}/thumbnails/"
+                    else:
+                        print("⚠️ SCENES_BUCKET 환경변수가 설정되지 않았습니다.")
+        
+        print(f"📷 썸네일 정보 수집 완료:")
+        print(f"   폴더 URI: {thumbnail_folder_uri}")
+        print(f"   개별 URL 개수: {len(thumbnail_urls)}")
+        
+        return {
+            "folder_uri": thumbnail_folder_uri,
+            "urls": thumbnail_urls
+        }
+        
+    except Exception as e:
+        print(f"❌ 썸네일 정보 수집 중 오류: {str(e)}")
+        return {
+            "folder_uri": None,
+            "urls": []
+        }
+
 async def create_final_summary(video_summaries: List[str], characters_info: str) -> str:
     """
     모든 비디오 요약을 종합하여 최종 요약을 생성합니다.
@@ -533,10 +626,16 @@ async def process_single_video(s3_video_uri: str, characters_info: str, movie_id
         print("🎉 모든 청크 처리 완료!")
         print("=" * 80)
         
+        # 최종 요약을 줄거리와 평론으로 분리
+        parsed_summary = parse_final_summary(final_summary)
+        
+        # 썸네일 정보 수집
+        thumbnail_info = collect_thumbnail_info(video_summaries, s3_video_uri)
+        
         return {
-            "video_summaries": video_summaries,
-            "final_summary": final_summary,
-            "final_summary_id": final_summary_id
+            "final_story": parsed_summary["story"],
+            "final_review": parsed_summary["review"],
+            "thumbnail_folder_uri": thumbnail_info["folder_uri"]
         }
         
     except Exception as e:
@@ -821,10 +920,16 @@ async def process_videos_from_folder(s3_folder_path: str, characters_info: str, 
         print("🎉 모든 비디오 처리 완료!")
         print("=" * 80)
         
+        # 최종 요약을 줄거리와 평론으로 분리
+        parsed_summary = parse_final_summary(final_summary)
+        
+        # 썸네일 정보 수집 (폴더 모드에서는 폴더 URI 없음)
+        thumbnail_info = collect_thumbnail_info(video_summaries, None)
+        
         return {
-            "video_summaries": video_summaries,
-            "final_summary": final_summary,
-            "final_summary_id": final_summary_id
+            "final_story": parsed_summary["story"],
+            "final_review": parsed_summary["review"],
+            "thumbnail_folder_uri": thumbnail_info["folder_uri"]
         }
         
     except Exception as e:

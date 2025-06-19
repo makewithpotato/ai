@@ -89,13 +89,7 @@ class MovieManagerRequest(BaseModel):
     language_code: str = "ko-KR"
     threshold: float = 30.0
 
-class VideoSummary(BaseModel):
-    video_uri: str
-    summary: str
-    order: int
-    summary_id: int
-
 class MovieManagerResponse(BaseModel):
-    video_summaries: List[VideoSummary]  # 각 비디오별 요약
-    final_summary: str  # 전체 영상에 대한 최종 요약
-    final_summary_id: int  # 최종 요약의 데이터베이스 ID
+    final_story: str  # 전체 줄거리
+    final_review: str  # 전체 평론
+    thumbnail_folder_uri: str = None  # 썸네일 후보 폴더 URI

@@ -117,25 +117,6 @@ def detect_scenes(video_path: str, threshold: float = 30.0, max_scenes_count: in
                 "frame_image": frame_image
             }
             
-            # 품질 검사 및 S3 저장 (썸네일 후보용 - 품질 좋은 것만)
-            if movie_id is not None:
-                try:
-                    quality_check = check_frame_quality(frame)
-                    
-                    print(f"🔍 Scene {scene_index + 1} 품질 검사:")
-                    print(f"   밝기: {quality_check['brightness']:.1f} ({'✅' if quality_check['brightness_ok'] else '❌'})")
-                    print(f"   선명도: {quality_check['sharpness']:.1f} ({'✅' if quality_check['sharpness_ok'] else '❌'})")
-                    
-                    if quality_check['is_good_quality']:
-                        thumbnail_url = save_thumbnail_to_s3(frame, movie_id, video_name, scene_index + 1, original_uri)
-                        scene_data['thumbnail_url'] = thumbnail_url
-                        print(f"✅ Scene {scene_index + 1}: 품질 양호 → S3 저장 완료")
-                    else:
-                        print(f"⚠️ Scene {scene_index + 1}: 품질 부족 → S3 저장 생략")
-                        
-                except Exception as e:
-                    print(f"❌ Scene {scene_index + 1} 처리 중 오류: {str(e)}")
-            
             scenes.append(scene_data)
     
     cap.release()
@@ -150,6 +131,32 @@ def detect_scenes(video_path: str, threshold: float = 30.0, max_scenes_count: in
             closest_scene = min(scenes, key=lambda x: abs(x["start_time"] - target_time))
             selected_scenes.append(closest_scene)
         scenes = selected_scenes
+
+    # 품질 검사 및 S3 저장 (최대 20개 장면에 대해서만 수행)
+    if movie_id is not None:
+        print(f"🔍 최대 {len(scenes)}개 장면에 대해 품질 검사 수행...")
+        for scene_index, scene_data in enumerate(scenes):
+            try:
+                # base64 이미지를 다시 프레임으로 변환
+                frame_bytes = base64.b64decode(scene_data["frame_image"])
+                frame_array = np.frombuffer(frame_bytes, dtype=np.uint8)
+                frame = cv2.imdecode(frame_array, cv2.IMREAD_COLOR)
+                
+                quality_check = check_frame_quality(frame)
+                
+                print(f"🔍 Scene {scene_index + 1} 품질 검사:")
+                print(f"   밝기: {quality_check['brightness']:.1f} ({'✅' if quality_check['brightness_ok'] else '❌'})")
+                print(f"   선명도: {quality_check['sharpness']:.1f} ({'✅' if quality_check['sharpness_ok'] else '❌'})")
+                
+                if quality_check['is_good_quality']:
+                    thumbnail_url = save_thumbnail_to_s3(frame, movie_id, video_name, scene_index + 1, original_uri)
+                    scene_data['thumbnail_url'] = thumbnail_url
+                    print(f"✅ Scene {scene_index + 1}: 품질 양호 → S3 저장 완료")
+                else:
+                    print(f"⚠️ Scene {scene_index + 1}: 품질 부족 → S3 저장 생략")
+                    
+            except Exception as e:
+                print(f"❌ Scene {scene_index + 1} 처리 중 오류: {str(e)}")
 
     return scenes
 
@@ -221,11 +228,11 @@ def check_frame_quality(frame: np.ndarray) -> Dict[str, float]:
     # 2. 선명도 검사 (Laplacian variance)
     laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
     
-    # 3. 품질 판정
-    # 밝기: 50-200 범위가 적절 (너무 어둡거나 밝지 않음)
-    # 선명도: Laplacian variance > 100이 선명함
-    brightness_ok = 50 <= brightness <= 200
-    sharpness_ok = laplacian_var > 100
+    # 3. 품질 판정 (기준 완화)
+    # 밝기: 30-220 범위가 적절 (기존 50-200에서 완화)
+    # 선명도: Laplacian variance > 50이 선명함 (기존 100에서 완화)
+    brightness_ok = 30 <= brightness <= 220
+    sharpness_ok = laplacian_var > 30
     
     is_good_quality = brightness_ok and sharpness_ok
     
