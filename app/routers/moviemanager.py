@@ -17,10 +17,15 @@ async def moviemanager_endpoint(req: MovieManagerRequest):
     if not req.s3_folder_path.startswith("s3://"):
         raise HTTPException(status_code=400, detail="s3_folder_path는 's3://'로 시작해야 합니다.")
     
+    if not req.movie_id:
+        raise HTTPException(status_code=400, detail="movie_id가 필요합니다.")
+    
     try:
         result = await process_videos_from_folder(
             s3_folder_path=req.s3_folder_path,
             characters_info=req.characters_info,
+            movie_id=req.movie_id,
+            init=req.init,
             language_code=req.language_code,
             threshold=req.threshold
         )
