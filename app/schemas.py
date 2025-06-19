@@ -80,9 +80,11 @@ class PipelineRequest(BaseModel):
 # 7) MovieManager 요청/응답
 # ─────────────────────────────────────────
 class MovieManagerRequest(BaseModel):
-    s3_folder_path: str  # S3 폴더 경로 (예: "s3://bucket/videos/")
+    s3_folder_path: str = None  # S3 폴더 경로 (예: "s3://bucket/videos/") - 폴더 모드용
+    s3_video_uri: str = None    # 원본 비디오 S3 URI (예: "s3://bucket/movie.mp4") - 단일 비디오 모드용
     characters_info: str  # 등장인물 정보 (자유 형식 문자열)
     movie_id: int  # 영화 ID (데이터베이스 저장용)
+    segment_duration: int = 600  # 세그먼트 길이 (초 단위, 기본값: 10분) - 단일 비디오 모드용
     init: bool = False  # True: 처음부터 시작, False: 마지막 상태부터 재시작
     language_code: str = "ko-KR"
     threshold: float = 30.0
@@ -90,8 +92,8 @@ class MovieManagerRequest(BaseModel):
 class VideoSummary(BaseModel):
     video_uri: str
     summary: str
-    order: int  # 처리 순서
-    summary_id: int  # 데이터베이스 저장된 요약 ID
+    order: int
+    summary_id: int
 
 class MovieManagerResponse(BaseModel):
     video_summaries: List[VideoSummary]  # 각 비디오별 요약
