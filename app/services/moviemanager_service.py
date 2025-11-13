@@ -5,6 +5,7 @@ import re
 from typing import List, Dict
 from app.services.transcribe_service import transcribe_video
 from app.services.scene_service import get_video_scenes
+from app.services.video_chunk_service import generate_video_chunks_info, extract_chunk_for_processing, cleanup_chunk_file
 from app.crud import create_or_update_summary, get_summaries, get_summaries_up_to, delete_summaries_from, update_movie_status, mark_movie_failed, get_resume_info, get_movie
 from app.database import SessionLocal
 import asyncio
@@ -239,6 +240,99 @@ async def get_bedrock_response_with_context(utterances: List[Dict], scene_images
     
     return claude_response
 
+def parse_final_summary(final_summary_text: str) -> Dict[str, str]:
+    """
+    최종 요약에서 줄거리와 평론을 분리합니다.
+    
+    Args:
+        final_summary_text: Claude에서 받은 최종 요약 텍스트
+        
+    Returns:
+        Dict: {"story": "줄거리", "review": "평론"}
+    """
+    try:
+        # ####### 구분자로 분리
+        parts = final_summary_text.split("#######")
+        
+        if len(parts) >= 2:
+            story = parts[0].strip()
+            review = parts[1].strip()
+            
+            print(f"📖 줄거리 추출 완료 (길이: {len(story)} 문자)")
+            print(f"📝 평론 추출 완료 (길이: {len(review)} 문자)")
+            
+            return {
+                "story": story,
+                "review": review
+            }
+        else:
+            # 구분자가 없는 경우 전체를 줄거리로 처리
+            print("⚠️ ####### 구분자를 찾을 수 없어 전체를 줄거리로 처리합니다.")
+            return {
+                "story": final_summary_text.strip(),
+                "review": "평론 정보가 없습니다."
+            }
+            
+    except Exception as e:
+        print(f"❌ 최종 요약 파싱 중 오류: {str(e)}")
+        return {
+            "story": final_summary_text.strip(),
+            "review": "평론 파싱 중 오류가 발생했습니다."
+        }
+
+def collect_thumbnail_info(video_summaries: List[Dict], s3_video_uri: str = None) -> Dict[str, any]:
+    """
+    썸네일 정보를 수집합니다.
+    
+    Args:
+        video_summaries: 비디오 요약 리스트 (썸네일 URL 포함)
+        s3_video_uri: 원본 비디오 URI (단일 비디오 모드용)
+        
+    Returns:
+        Dict: {"folder_uri": str, "urls": List[str]}
+    """
+    thumbnail_urls = []
+    thumbnail_folder_uri = None
+    
+    try:
+        # 각 요약에서 썸네일 URL 수집 (미래에 추가될 수 있음)
+        for summary in video_summaries:
+            if isinstance(summary, dict) and "thumbnail_urls" in summary:
+                thumbnail_urls.extend(summary["thumbnail_urls"])
+        
+        # 단일 비디오 모드인 경우 폴더 URI 생성
+        if s3_video_uri and s3_video_uri.startswith("s3://"):
+            # 원본 비디오 URI에서 썸네일 폴더 경로 생성
+            # 예: s3://bucket/movies/series1/episode1.mp4 → s3://scenes-bucket/movies/series1/thumbnails/
+            uri_parts = s3_video_uri.replace("s3://", "").split("/")
+            
+            if len(uri_parts) > 1:
+                # 디렉토리 부분 추출 (파일명 제외)
+                directory_path = "/".join(uri_parts[1:-1])
+                if directory_path:
+                    # 같은 디렉토리에 thumbnails 폴더 생성
+                    scenes_bucket = os.getenv("SCENES_BUCKET")
+                    if scenes_bucket:
+                        thumbnail_folder_uri = f"s3://{scenes_bucket}/{directory_path}/thumbnails/"
+                    else:
+                        print("⚠️ SCENES_BUCKET 환경변수가 설정되지 않았습니다.")
+        
+        print(f"📷 썸네일 정보 수집 완료:")
+        print(f"   폴더 URI: {thumbnail_folder_uri}")
+        print(f"   개별 URL 개수: {len(thumbnail_urls)}")
+        
+        return {
+            "folder_uri": thumbnail_folder_uri,
+            "urls": thumbnail_urls
+        }
+        
+    except Exception as e:
+        print(f"❌ 썸네일 정보 수집 중 오류: {str(e)}")
+        return {
+            "folder_uri": None,
+            "urls": []
+        }
+
 async def create_final_summary(video_summaries: List[str], characters_info: str) -> str:
     """
     모든 비디오 요약을 종합하여 최종 요약을 생성합니다.
@@ -303,6 +397,309 @@ async def create_final_summary(video_summaries: List[str], characters_info: str)
     
     return final_response
 
+async def process_single_video(s3_video_uri: str, characters_info: str, movie_id: int, 
+                              segment_duration: int = 600, init: bool = False, 
+                              language_code: str = "ko-KR", threshold: float = 30.0) -> Dict:
+    """
+    원본 비디오 파일을 받아서 동적으로 청크를 추출하며 순차적으로 처리하여 각각의 요약과 최종 요약을 생성합니다.
+    
+    Args:
+        s3_video_uri: 원본 비디오 S3 URI
+        characters_info: 등장인물 정보
+        movie_id: 영화 ID (데이터베이스 저장용)
+        segment_duration: 각 세그먼트의 길이 (초 단위, 기본값: 10분)
+        init: True이면 처음부터 시작, False이면 마지막 상태부터 재시작
+        language_code: 언어 코드
+        threshold: 장면 감지 임계값
+    
+    Returns:
+        Dict: 처리 결과
+    """
+    try:
+        print(f"🎬 원본 비디오 동적 청크 처리 시작")
+        print(f"   원본 URI: {s3_video_uri}")
+        print(f"   Movie ID: {movie_id}")
+        print(f"   세그먼트 길이: {segment_duration}초 ({segment_duration/60:.1f}분)")
+        print("=" * 80)
+        
+        # 청크 정보 생성 (실제 파일 생성 없이 메타데이터만)
+        chunks_info = generate_video_chunks_info(s3_video_uri, segment_duration)
+        total_chunks = len(chunks_info)
+        
+        # init 파라미터에 따른 처리
+        start_from = 0
+        
+        if init:
+            print(f"🔄 init=True: 처음부터 새로 시작합니다. Movie ID: {movie_id}")
+            # 기존 요약들 모두 삭제
+            db = SessionLocal()
+            deleted_count = delete_summaries_from(db, movie_id, 1)  # summary_id 1부터 모두 삭제
+            update_movie_status(db, movie_id, "PENDING")  # 상태를 PENDING으로 리셋
+            db.close()
+            print(f"🗑️ 기존 요약 {deleted_count}개 삭제 완료")
+            print(f"📊 Movie 상태 리셋: PENDING")
+            
+        else:
+            # 재시작 정보 확인
+            db = SessionLocal()
+            resume_info = get_resume_info(db, movie_id)
+            db.close()
+            
+            if resume_info:
+                if resume_info.get("stage") == "organizing" or resume_info.get("stage") == "complete":
+                    if resume_info.get("stage") == "complete":
+                        print(f"⚠️ 이미 완료된 작업입니다. Movie ID: {movie_id}")
+                        print(f"💡 처음부터 다시 시작하려면 init=true로 설정하세요.")
+                    print(f"🔄 ORGANIZING 단계에서 재시작합니다. Movie ID: {movie_id}")
+                    start_from = total_chunks  # 모든 청크 건너뛰고 최종 요약으로
+                    
+                elif resume_info.get("stage") == "proceeding":
+                    current = resume_info.get("current", 0)
+                    total = resume_info.get("total", 0)
+                    print(f"🔄 PROCEEDING[{current}/{total}] 단계에서 재시작합니다. Movie ID: {movie_id}")
+                    start_from = current  # 현재 진행된 위치부터 시작
+            else:
+                print(f"🆕 새로운 작업을 시작합니다. Movie ID: {movie_id}")
+        
+        # 변수 초기화
+        video_summaries = []
+        previous_summaries = []
+        
+        if start_from > 0 and start_from < total_chunks:  # PROCEEDING 재시작인 경우
+            # 기존 요약들을 로드
+            db = SessionLocal()
+            existing_summaries = get_summaries_up_to(db, movie_id, start_from)
+            db.close()
+            
+            for summary in existing_summaries:
+                chunk_info = chunks_info[summary.summary_id - 1] if summary.summary_id <= len(chunks_info) else None
+                video_summaries.append({
+                    "video_uri": f"chunk_{summary.summary_id}_{chunk_info['start']:.0f}s-{chunk_info['end']:.0f}s" if chunk_info else f"chunk_{summary.summary_id}",
+                    "summary": summary.summary_text,
+                    "order": summary.summary_id,
+                    "summary_id": summary.summary_id
+                })
+                previous_summaries.append(summary.summary_text)
+            
+            print(f"📚 PROCEEDING 재시작: 기존 요약 {len(existing_summaries)}개 로드 완료")
+        elif start_from >= total_chunks:  # ORGANIZING 재시작인 경우
+            # 기존 청크 요약들을 모두 로드
+            db = SessionLocal()
+            existing_summaries = get_summaries_up_to(db, movie_id, total_chunks)
+            db.close()
+            
+            for summary in existing_summaries:
+                if summary.summary_id <= total_chunks:  # 최종 요약 제외
+                    chunk_info = chunks_info[summary.summary_id - 1] if summary.summary_id <= len(chunks_info) else None
+                    video_summaries.append({
+                        "video_uri": f"chunk_{summary.summary_id}_{chunk_info['start']:.0f}s-{chunk_info['end']:.0f}s" if chunk_info else f"chunk_{summary.summary_id}",
+                        "summary": summary.summary_text,
+                        "order": summary.summary_id,
+                        "summary_id": summary.summary_id
+                    })
+            
+            print(f"📚 ORGANIZING: 기존 청크 요약 {len(video_summaries)}개 로드 완료")
+        
+        # 상태를 PROCEEDING으로 업데이트 (시작)
+        if start_from < total_chunks:
+            db = SessionLocal()
+            update_movie_status(db, movie_id, f"PROCEEDING[{start_from}/{total_chunks}]")
+            db.close()
+            print(f"📊 Movie 상태 업데이트: PROCEEDING[{start_from}/{total_chunks}]")
+        
+        print(f"🎥 총 {total_chunks}개의 청크 중 {start_from + 1}번부터 처리합니다.")
+        print(f"🎬 Movie ID: {movie_id}")
+        print("=" * 80)
+        
+        # start_from 인덱스부터 청크 처리 시작
+        for i in range(start_from, total_chunks):
+            chunk_info = chunks_info[i]
+            current_chunk = i + 1
+            
+            # 각 청크 처리 시작 시 상태 업데이트
+            db = SessionLocal()
+            update_movie_status(db, movie_id, f"PROCEEDING[{current_chunk}/{total_chunks}]")
+            db.close()
+            print(f"📊 Movie 상태 업데이트: PROCEEDING[{current_chunk}/{total_chunks}]")
+            
+            print(f"🎬 [{current_chunk}/{total_chunks}] 청크 처리 시작: {chunk_info['start']:.1f}s - {chunk_info['end']:.1f}s ({chunk_info['duration']:.1f}s)")
+            
+            # 청크 파일 동적 추출
+            chunk_file_path = None
+            try:
+                chunk_file_path = extract_chunk_for_processing(s3_video_uri, chunk_info)
+                
+                # 청크를 임시 S3에 업로드하지 않고 로컬 파일 URI로 처리
+                chunk_uri = f"file://{chunk_file_path}"
+                
+                # transcribe와 scene 병렬 처리 (movie_id와 original_uri 전달)
+                transcribe_task = asyncio.to_thread(transcribe_video, chunk_uri, language_code)
+                scene_task = asyncio.to_thread(get_video_scenes, chunk_uri, threshold, movie_id, s3_video_uri)
+                utterances, scenes = await asyncio.gather(transcribe_task, scene_task)
+                
+                print(f"✅ STT 결과: {len(utterances) if utterances else 0}개의 발화")
+                print(f"✅ 장면 감지: {len(scenes) if scenes else 0}개의 장면")
+                
+                # 빈 데이터 처리
+                if not utterances:
+                    utterances = []
+                    print("⚠️ STT 결과가 없습니다. (무음 구간일 수 있습니다)")
+                
+                if not scenes:
+                    scenes = []
+                    print("⚠️ 장면 감지 결과가 없습니다.")
+                
+                # scene의 base64 이미지와 start_time 추출
+                scene_images = [
+                    {"start_time": scene["start_time"], "image": scene["frame_image"]}
+                    for scene in scenes
+                ] if scenes else []
+                
+                # 데이터가 없는 경우 건너뛰기
+                if not utterances and not scene_images:
+                    print("⚠️ STT와 장면 데이터가 모두 없어 이 청크를 건너뜁니다.")
+                    continue
+                
+                print(f"🤖 Claude 요약 생성 시작...")
+                # Rolling Context를 적용하여 현재 청크 요약 생성
+                summary = await get_bedrock_response_with_context(utterances, scene_images, characters_info, previous_summaries, i)
+                print(f"✅ Claude 요약 생성 완료 (길이: {len(summary)} 문자)")
+                
+                # 요약을 데이터베이스에 저장 (청크 순서에 맞는 summary_id 사용)
+                print(f"💾 데이터베이스 저장 시작...")
+                summary_id = i + 1  # 청크 순서와 동일하게 (1부터 시작)
+                print(f"   할당된 Summary ID: {summary_id} (청크 순서 {i + 1})")
+                save_success = save_summary_to_db(movie_id, summary_id, summary)
+                
+                if save_success:
+                    print(f"💾 요약 저장 완료: Summary ID {summary_id}")
+                else:
+                    print(f"⚠️ 요약 저장 실패: Summary ID {summary_id}")
+                
+                video_summaries.append({
+                    "video_uri": f"chunk_{current_chunk}_{chunk_info['start']:.0f}s-{chunk_info['end']:.0f}s",
+                    "summary": summary,
+                    "order": i + 1,
+                    "summary_id": summary_id
+                })
+                
+                # 다음 청크 처리를 위해 이전 요약에 추가
+                previous_summaries.append(summary)
+                
+            finally:
+                # 청크 임시 파일 정리
+                if chunk_file_path:
+                    cleanup_chunk_file(chunk_file_path)
+            
+            
+            print(f"✅ [{current_chunk}/{total_chunks}] 청크 처리 완료")
+            print("=" * 80)
+        
+        # 최종 요약 생성 시작 시 상태 업데이트
+        db = SessionLocal()
+        update_movie_status(db, movie_id, "ORGANIZING")
+        db.close()
+        print(f"📊 Movie 상태 업데이트: ORGANIZING")
+        
+        print("🎭 최종 종합 요약 생성 중...")
+        # 최종 종합 요약 생성
+        final_summary = await create_final_summary([vs["summary"] for vs in video_summaries], characters_info)
+        print(f"✅ 최종 요약 생성 완료 (길이: {len(final_summary)} 문자)")
+        
+        # 최종 요약도 데이터베이스에 저장 (모든 청크 다음 순서)
+        print(f"💾 최종 요약 데이터베이스 저장 시작...")
+        final_summary_id = total_chunks + 1  # 마지막 청크 다음 순서
+        print(f"   할당된 Final Summary ID: {final_summary_id} (최종 요약)")
+        final_save_success = save_summary_to_db(movie_id, final_summary_id, final_summary)
+        
+        if final_save_success:
+            print(f"💾 최종 요약 저장 완료: Summary ID {final_summary_id}")
+        else:
+            print(f"⚠️ 최종 요약 저장 실패: Summary ID {final_summary_id}")
+        
+        # 모든 처리 완료 시 상태 업데이트
+        db = SessionLocal()
+        update_movie_status(db, movie_id, "COMPLETE")
+        db.close()
+        print(f"📊 Movie 상태 업데이트: COMPLETE")
+        
+        print("🎉 모든 청크 처리 완료!")
+        print("=" * 80)
+        
+        # 최종 요약을 줄거리와 평론으로 분리
+        parsed_summary = parse_final_summary(final_summary)
+        
+        # 썸네일 정보 수집
+        thumbnail_info = collect_thumbnail_info(video_summaries, s3_video_uri)
+        
+        return {
+            "final_story": parsed_summary["story"],
+            "final_review": parsed_summary["review"],
+            "thumbnail_folder_uri": thumbnail_info["folder_uri"]
+        }
+        
+    except Exception as e:
+        # 오류 발생 시 실패 상태로 업데이트
+        try:
+            db = SessionLocal()
+            mark_movie_failed(db, movie_id)
+            db.close()
+            print(f"📊 Movie 상태 업데이트: 오류로 인한 FAILED 상태")
+        except:
+            pass
+        
+        print(f"❌ 오류 발생: {str(e)}")
+        raise RuntimeError(f"원본 비디오 처리 중 오류 발생: {str(e)}")
+
+def save_summary_to_db(movie_id: int, summary_id: int, summary_text: str) -> bool:
+    """
+    요약을 데이터베이스에 저장합니다.
+    
+    Args:
+        movie_id: 영화 ID
+        summary_id: 요약 순서 ID
+        summary_text: 요약 텍스트
+    
+    Returns:
+        bool: 저장 성공 여부
+    """
+    try:
+        print(f"💾 요약 저장 시도: Movie ID {movie_id}, Summary ID {summary_id}")
+        print(f"   Summary Text 길이: {len(summary_text)} 문자")
+        print(f"   Summary Text 미리보기: {summary_text[:100]}...")
+        
+        # 별도의 데이터베이스 세션 사용 (트랜잭션 롤백 방지)
+        db = SessionLocal()
+        
+        try:
+            # movie 테이블에 해당 ID가 존재하는지 확인
+            movie = get_movie(db, movie_id)
+            if not movie:
+                print(f"❌ Movie ID {movie_id}가 존재하지 않습니다!")
+                return False
+            
+            print(f"✅ Movie ID {movie_id} 확인됨: {movie.title}")
+            
+            # 요약 생성 및 저장 (덮어쓰기 지원)
+            summary = create_or_update_summary(db, movie_id, summary_id, summary_text)
+            
+            print(f"✅ 요약 저장 완료: Movie ID {movie_id}, Summary ID {summary_id}")
+            print(f"   저장된 데이터: movie_id={summary.movie_id}, summary_id={summary.summary_id}")
+            return True
+            
+        except Exception as e:
+            print(f"❌ 요약 저장 중 오류: {str(e)}")
+            db.rollback()
+            return False
+        finally:
+            db.close()
+        
+    except Exception as e:
+        print(f"❌ 요약 저장 실패: {str(e)}")
+        import traceback
+        print(f"   상세 오류: {traceback.format_exc()}")
+        return False
+
 async def process_videos_from_folder(s3_folder_path: str, characters_info: str, movie_id: int, init: bool = False, language_code: str = "ko-KR", threshold: float = 30.0) -> Dict:
     """
     S3 폴더에서 비디오 파일들을 찾아 순차적으로 처리하여 각각의 요약과 최종 요약을 생성합니다.
@@ -324,7 +721,7 @@ async def process_videos_from_folder(s3_folder_path: str, characters_info: str, 
         total_videos = len(video_uris)
         
         # init 파라미터에 따른 처리
-        start_from = 0  # 기본값: 처음부터 시작
+        start_from = 0
         
         if init:
             print(f"🔄 init=True: 처음부터 새로 시작합니다. Movie ID: {movie_id}")
@@ -342,12 +739,10 @@ async def process_videos_from_folder(s3_folder_path: str, characters_info: str, 
             db.close()
             
             if resume_info:
-                if resume_info.get("stage") == "complete":
-                    print(f"⚠️ 이미 완료된 작업입니다. Movie ID: {movie_id}")
-                    print(f"💡 처음부터 다시 시작하려면 init=true로 설정하세요.")
-                    # 기존 결과 반환 (필요시 구현)
-                    raise RuntimeError("이미 완료된 작업입니다. init=true로 재시작하세요.")
-                elif resume_info.get("stage") == "organizing":
+                if resume_info.get("stage") == "organizing" or resume_info.get("stage") == "complete":
+                    if resume_info.get("stage") == "complete":
+                        print(f"⚠️ 이미 완료된 작업입니다. Movie ID: {movie_id}")
+                        print(f"💡 처음부터 다시 시작하려면 init=true로 설정하세요.")
                     print(f"🔄 ORGANIZING 단계에서 재시작합니다. Movie ID: {movie_id}")
                     # 모든 비디오 요약은 완료되었으므로 최종 요약만 다시 생성
                     start_from = total_videos  # 모든 비디오 건너뛰고 최종 요약으로
@@ -374,6 +769,7 @@ async def process_videos_from_folder(s3_folder_path: str, characters_info: str, 
                     print(f"📍 비디오 {start_from + 1}번부터 재시작합니다.")
             else:
                 print(f"🆕 새로운 작업을 시작합니다. Movie ID: {movie_id}")
+        
         # 변수 초기화 (ORGANIZING 단계에서는 이미 초기화됨)
         if 'video_summaries' not in locals():
             video_summaries = []
@@ -396,6 +792,22 @@ async def process_videos_from_folder(s3_folder_path: str, characters_info: str, 
                 previous_summaries.append(summary.summary_text)
             
             print(f"📚 PROCEEDING 재시작: 기존 요약 {len(existing_summaries)}개 로드 완료")
+        elif start_from >= total_videos:  # ORGANIZING 재시작인 경우
+            # 기존 비디오 요약들을 모두 로드
+            db = SessionLocal()
+            existing_summaries = get_summaries_up_to(db, movie_id, total_videos if total_videos > 0 else 100)  # 충분히 큰 값
+            db.close()
+            
+            for summary in existing_summaries:
+                if summary.summary_id <= total_videos:  # 최종 요약 제외
+                    video_summaries.append({
+                        "video_uri": video_uris[summary.summary_id - 1] if summary.summary_id <= len(video_uris) else f"s3://dummy/segment_{summary.summary_id:03d}.mp4",
+                        "summary": summary.summary_text,
+                        "order": summary.summary_id,
+                        "summary_id": summary.summary_id
+                    })
+            
+            print(f"📚 ORGANIZING: 기존 비디오 요약 {len(video_summaries)}개 로드 완료")
         
         # 상태를 PROCEEDING으로 업데이트 (시작)
         if start_from < total_videos:
@@ -420,9 +832,9 @@ async def process_videos_from_folder(s3_folder_path: str, characters_info: str, 
             
             print(f"🎬 [{current_video}/{total_videos}] 비디오 처리 시작: {video_uri}")
             
-            # transcribe와 scene 병렬 처리
+            # transcribe와 scene 병렬 처리 (movie_id 전달)
             transcribe_task = asyncio.to_thread(transcribe_video, video_uri, language_code)
-            scene_task = asyncio.to_thread(get_video_scenes, video_uri, threshold)
+            scene_task = asyncio.to_thread(get_video_scenes, video_uri, threshold, movie_id)
             utterances, scenes = await asyncio.gather(transcribe_task, scene_task)
             
             print(f"✅ STT 결과: {len(utterances) if utterances else 0}개의 발화")
@@ -508,15 +920,22 @@ async def process_videos_from_folder(s3_folder_path: str, characters_info: str, 
         print("🎉 모든 비디오 처리 완료!")
         print("=" * 80)
         
+        # 최종 요약을 줄거리와 평론으로 분리
+        parsed_summary = parse_final_summary(final_summary)
+        
+        # 썸네일 정보 수집 (폴더 모드에서는 폴더 URI 없음)
+        thumbnail_info = collect_thumbnail_info(video_summaries, None)
+        
         return {
-            "video_summaries": video_summaries,
-            "final_summary": final_summary,
-            "final_summary_id": final_summary_id
+            "final_story": parsed_summary["story"],
+            "final_review": parsed_summary["review"],
+            "thumbnail_folder_uri": thumbnail_info["folder_uri"]
         }
         
     except Exception as e:
         # 오류 발생 시 실패 상태로 업데이트
         try:
+            db = SessionLocal()
             mark_movie_failed(db, movie_id)
             db.close()
             print(f"📊 Movie 상태 업데이트: 오류로 인한 FAILED 상태")
@@ -525,53 +944,4 @@ async def process_videos_from_folder(s3_folder_path: str, characters_info: str, 
         
         print(f"❌ 오류 발생: {str(e)}")
         raise RuntimeError(f"S3 폴더 비디오 처리 중 오류 발생: {str(e)}")
-
-def save_summary_to_db(movie_id: int, summary_id: int, summary_text: str) -> bool:
-    """
-    요약을 데이터베이스에 저장합니다.
-    
-    Args:
-        movie_id: 영화 ID
-        summary_id: 요약 순서 ID
-        summary_text: 요약 텍스트
-    
-    Returns:
-        bool: 저장 성공 여부
-    """
-    try:
-        print(f"💾 요약 저장 시도: Movie ID {movie_id}, Summary ID {summary_id}")
-        print(f"   Summary Text 길이: {len(summary_text)} 문자")
-        print(f"   Summary Text 미리보기: {summary_text[:100]}...")
-        
-        # 별도의 데이터베이스 세션 사용 (트랜잭션 롤백 방지)
-        db = SessionLocal()
-        
-        try:
-            # movie 테이블에 해당 ID가 존재하는지 확인
-            movie = get_movie(db, movie_id)
-            if not movie:
-                print(f"❌ Movie ID {movie_id}가 존재하지 않습니다!")
-                return False
-            
-            print(f"✅ Movie ID {movie_id} 확인됨: {movie.title}")
-            
-            # 요약 생성 및 저장 (덮어쓰기 지원)
-            summary = create_or_update_summary(db, movie_id, summary_id, summary_text)
-            
-            print(f"✅ 요약 저장 완료: Movie ID {movie_id}, Summary ID {summary_id}")
-            print(f"   저장된 데이터: movie_id={summary.movie_id}, summary_id={summary.summary_id}")
-            return True
-            
-        except Exception as e:
-            print(f"❌ 요약 저장 중 오류: {str(e)}")
-            db.rollback()
-            return False
-        finally:
-            db.close()
-        
-    except Exception as e:
-        print(f"❌ 요약 저장 실패: {str(e)}")
-        import traceback
-        print(f"   상세 오류: {traceback.format_exc()}")
-        return False
 

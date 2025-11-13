@@ -17,7 +17,7 @@ def transcribe_endpoint(req: TranscribeRequest):
     
     try:
         utterances = transcribe_video(
-            s3_uri=req.s3_video_uri,
+            uri=req.s3_video_uri,
             language_code=req.language_code
         )
         return TranscribeResponse(utterances=utterances)

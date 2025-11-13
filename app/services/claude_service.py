@@ -1,7 +1,10 @@
 # app/services/claude_service.py
 
+from dotenv import load_dotenv
 import os
 from anthropic import AnthropicBedrock
+
+load_dotenv()
 
 bedrock_client = None
 CLAUDE_MODEL_ID = None
