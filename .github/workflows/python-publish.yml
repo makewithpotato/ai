@@ -5,10 +5,10 @@ on:
     types:
       - closed
     branches:
-      - develop
+      - main
   #테스트 돌리는용
   push:
-    branches: [ "develop" ]
+    branches: [ "main" ]
       
 jobs:
   build-and-deploy:
