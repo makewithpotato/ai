@@ -62,10 +62,6 @@ jobs:
 
           COPY . .
 
-          # .env는 이미지에 포함시키지 않는 것이 보안상 안전합니다.
-          # 필요에 따라 주석을 제거하세요.
-          # COPY .env .env
-
           EXPOSE 8000
 
           CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
@@ -87,38 +83,36 @@ jobs:
 
       - name: Deploy to EC2
         run: |
-          IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/ai-app:latest
-          CONTAINER_NAME=ai_app
+          IMAGE="${{ secrets.DOCKERHUB_USERNAME }}/ai-app:latest"
+          CONTAINER_NAME="ai_app"
+          REMOTE_ENV_PATH="/home/${{ secrets.EC2_USERNAME }}/.env"
 
           echo "${{ secrets.EC2_PRIVATE_KEY }}" > deploy_key.pem
           chmod 600 deploy_key.pem
 
-          # 생성한 .env를 EC2로 업로드 (리모트 홈 디렉토리)
+          # .env 업로드
           echo "${{ secrets.ENV_FILE }}" | base64 --decode > .env
           scp -i deploy_key.pem -o StrictHostKeyChecking=no .env \
-            ${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }}:/home/${{ secrets.EC2_USERNAME }}/.env
+            ${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }}:${REMOTE_ENV_PATH}
 
-          # ssh로 원격에서 실행할 스크립트은 단일 인용 heredoc으로 전달 (로컬 변수 확장 방지)
+          # SSH로 실행 (heredoc 안에서는 로컬 변수를 안전하게 전달)
           ssh -i deploy_key.pem -o StrictHostKeyChecking=no \
-            ${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }} <<'SSH_EOF'
-            REMOTE_IMAGE=${IMAGE}
-            REMOTE_CONTAINER_NAME=${CONTAINER_NAME}
-
-            # 기존 컨테이너 제거 (있다면)
-            if sudo docker ps -a --format '{{.Names}}' | grep -q "^${REMOTE_CONTAINER_NAME}$"; then
-              sudo docker rm -f ${REMOTE_CONTAINER_NAME} || true
+            ${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }} "IMAGE=$IMAGE CONTAINER_NAME=$CONTAINER_NAME ENV_PATH=$REMOTE_ENV_PATH bash -s" <<'SSH_EOF'
+            # 기존 컨테이너 삭제
+            if sudo docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+              sudo docker rm -f ${CONTAINER_NAME} || true
             fi
 
             # 최신 이미지 pull
-            sudo docker pull ${REMOTE_IMAGE}
+            sudo docker pull ${IMAGE}
 
-            # 컨테이너 실행 (포트 매핑: 호스트 8000 -> 컨테이너 8000)
+            # 컨테이너 실행
             sudo docker run -d \
-              --name ${REMOTE_CONTAINER_NAME} \
+              --name ${CONTAINER_NAME} \
               -p 8000:8000 \
-              --env-file /home/${USER}/.env \
+              --env-file ${ENV_PATH} \
               --restart unless-stopped \
-              ${REMOTE_IMAGE}
+              ${IMAGE}
 
             # 불필요한 이미지/볼륨 정리
             sudo docker system prune -a -f --volumes || true
