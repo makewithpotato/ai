@@ -1,15 +1,14 @@
 name: Python CI with FastAPI & Docker Deploy
 
 on:
-  pull_request: 
+  pull_request:
     types:
       - closed
     branches:
       - main
-  #테스트 돌리는용
   push:
     branches: [ "main" ]
-      
+
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
@@ -56,7 +55,6 @@ jobs:
           
           WORKDIR /app
           
-          # 시스템 의존성 설치 (opencv-python, psycopg2 등에 필요)
           RUN apt-get update && apt-get install -y \
               gcc \
               g++ \
@@ -65,19 +63,15 @@ jobs:
               libglib2.0-0 \
               && rm -rf /var/lib/apt/lists/*
           
-          # Python 의존성 설치
           COPY requirements.txt .
           RUN pip install --no-cache-dir -r requirements.txt
           
-          # 애플리케이션 코드 복사
           COPY . .
           
-          # .env 파일 복사
           COPY .env .env
           
           EXPOSE 8080
           
-          # uvicorn으로 FastAPI 실행
           CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
           EOF
 
@@ -95,42 +89,42 @@ jobs:
       # 9. Push image to Docker Hub
       - name: Push to Docker Hub
         run: docker push ${{ secrets.DOCKERHUB_USERNAME }}/ai-app
-        
-# 10. Deploy to EC2
-- name: Deploy to EC2
-  run: |
-    IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/ai-app:latest
-    CONTAINER_NAME=ai_app
-    echo "${{ secrets.EC2_PRIVATE_KEY }}" > deploy_key.pem
-    chmod 600 deploy_key.pem
 
-    # --- 여기 추가 ---
-    # EC2에 .env 파일 업로드
-    echo "${{ secrets.ENV_FILE }}" | base64 --decode > .env
-    scp -i deploy_key.pem -o StrictHostKeyChecking=no .env \
-        ${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }}:/home/${{ secrets.EC2_USERNAME }}/.env
+      # 10. Deploy to EC2
+      - name: Deploy to EC2
+        run: |
+          IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/ai-app:latest
+          CONTAINER_NAME=ai_app
 
-    ssh -i deploy_key.pem -o StrictHostKeyChecking=no \
-        ${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }} << EOF
-      REMOTE_IMAGE=${IMAGE}
-      REMOTE_CONTAINER_NAME=${CONTAINER_NAME}
+          echo "${{ secrets.EC2_PRIVATE_KEY }}" > deploy_key.pem
+          chmod 600 deploy_key.pem
 
-      # 기존 컨테이너 제거
-      if sudo docker ps -a | grep -q \${REMOTE_CONTAINER_NAME}; then
-        sudo docker rm -f \${REMOTE_CONTAINER_NAME}
-      fi
+          # EC2에 .env 업로드
+          echo "${{ secrets.ENV_FILE }}" | base64 --decode > .env
+          scp -i deploy_key.pem -o StrictHostKeyChecking=no .env \
+              ${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }}:/home/${{ secrets.EC2_USERNAME }}/.env
 
-      # 최신 이미지 pull
-      sudo docker pull \${REMOTE_IMAGE}
+          # EC2 내부 명령 실행
+          ssh -i deploy_key.pem -o StrictHostKeyChecking=no \
+              ${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }} << EOF
+            REMOTE_IMAGE=${IMAGE}
+            REMOTE_CONTAINER_NAME=${CONTAINER_NAME}
 
-      # 컨테이너 실행
-      sudo docker run -d \
-        --name \${REMOTE_CONTAINER_NAME} \
-        -p 8000:8000 \
-        --env-file /home/${{ secrets.EC2_USERNAME }}/.env \
-        --restart unless-stopped \
-        \${REMOTE_IMAGE}
+            # 기존 컨테이너 제거
+            if sudo docker ps -a | grep -q \${REMOTE_CONTAINER_NAME}; then
+              sudo docker rm -f \${REMOTE_CONTAINER_NAME}
+            fi
 
-      sudo docker system prune -a -f --volumes
+            # 최신 이미지 pull
+            sudo docker pull \${REMOTE_IMAGE}
+
+            # 컨테이너 실행
+            sudo docker run -d \
+              --name \${REMOTE_CONTAINER_NAME} \
+              -p 8000:8000 \
+              --env-file /home/${{ secrets.EC2_USERNAME }}/.env \
+              --restart unless-stopped \
+              \${REMOTE_IMAGE}
+
+            sudo docker system prune -a -f --volumes
 EOF
-
