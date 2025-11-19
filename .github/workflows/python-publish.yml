@@ -1,15 +1,14 @@
 name: Python CI with FastAPI & Docker Deploy
 
 on:
-  pull_request: 
+  pull_request:
     types:
       - closed
     branches:
       - main
-
   push:
     branches: [ "main" ]
-      
+
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
@@ -17,16 +16,14 @@ jobs:
       contents: read
 
     steps:
-      # 1. Checkout code
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      # 2. Set up Python
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      # 3. Cache pip packages
       - name: Cache pip packages
         uses: actions/cache@v3
         with:
@@ -35,27 +32,23 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      # 4. Install dependencies
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # 5. Create .env file
       - name: make .env file
         run: |
-          touch .env
-          chmod 644 .env
           echo "${{ secrets.ENV_FILE }}" | base64 --decode > .env
+          chmod 600 .env
 
-      # 6. Generate Dockerfile
       - name: Generate Dockerfile
         run: |
-          tee Dockerfile << EOF
+          cat > Dockerfile <<'DOCKERFILE'
           FROM python:3.11-slim
-          
+
           WORKDIR /app
-          
+
           RUN apt-get update && apt-get install -y \
               gcc \
               g++ \
@@ -63,68 +56,70 @@ jobs:
               libgl1 \
               libglib2.0-0 \
               && rm -rf /var/lib/apt/lists/*
-          
+
           COPY requirements.txt .
           RUN pip install --no-cache-dir -r requirements.txt
-          
+
           COPY . .
-          COPY .env .env
-          
-          EXPOSE 8080
-          
+
+          # .env는 이미지에 포함시키지 않는 것이 보안상 안전합니다.
+          # 필요에 따라 주석을 제거하세요.
+          # COPY .env .env
+
+          EXPOSE 8000
+
           CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
-          EOF
+          DOCKERFILE
 
-      # 7. Build Docker image
       - name: Build Docker image
-        run: docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/ai-app --platform linux/amd64 .
+        run: |
+          docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/ai-app:latest --platform linux/amd64 .
 
-      # 8. Docker Hub login
-      - name: Docker login
+      - name: Docker Hub login
         uses: docker/login-action@v2
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_PASSWORD }}
 
-      # 9. Push image to Docker Hub
-      - name: Push to Docker Hub
-        run: docker push ${{ secrets.DOCKERHUB_USERNAME }}/ai-app:latest
+      - name: Push image to Docker Hub
+        run: |
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/ai-app:latest
 
-      # 10. Deploy to EC2 (❗ 들여쓰기 반드시 jobs 안으로)
       - name: Deploy to EC2
         run: |
           IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/ai-app:latest
           CONTAINER_NAME=ai_app
+
           echo "${{ secrets.EC2_PRIVATE_KEY }}" > deploy_key.pem
           chmod 600 deploy_key.pem
 
-          # 업로드용 .env 생성
+          # 생성한 .env를 EC2로 업로드 (리모트 홈 디렉토리)
           echo "${{ secrets.ENV_FILE }}" | base64 --decode > .env
-
-          # .env 파일 EC2로 업로드
           scp -i deploy_key.pem -o StrictHostKeyChecking=no .env \
-              ${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }}:/home/${{ secrets.EC2_USERNAME }}/.env
+            ${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }}:/home/${{ secrets.EC2_USERNAME }}/.env
 
+          # ssh로 원격에서 실행할 스크립트은 단일 인용 heredoc으로 전달 (로컬 변수 확장 방지)
           ssh -i deploy_key.pem -o StrictHostKeyChecking=no \
-              ${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }} << EOF
+            ${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }} <<'SSH_EOF'
             REMOTE_IMAGE=${IMAGE}
             REMOTE_CONTAINER_NAME=${CONTAINER_NAME}
 
-            # 기존 컨테이너 제거
-            if sudo docker ps -a | grep -q \${REMOTE_CONTAINER_NAME}; then
-              sudo docker rm -f \${REMOTE_CONTAINER_NAME}
+            # 기존 컨테이너 제거 (있다면)
+            if sudo docker ps -a --format '{{.Names}}' | grep -q "^${REMOTE_CONTAINER_NAME}$"; then
+              sudo docker rm -f ${REMOTE_CONTAINER_NAME} || true
             fi
 
             # 최신 이미지 pull
-            sudo docker pull \${REMOTE_IMAGE}
+            sudo docker pull ${REMOTE_IMAGE}
 
-            # 컨테이너 실행
+            # 컨테이너 실행 (포트 매핑: 호스트 8000 -> 컨테이너 8000)
             sudo docker run -d \
-              --name \${REMOTE_CONTAINER_NAME} \
+              --name ${REMOTE_CONTAINER_NAME} \
               -p 8000:8000 \
-              --env-file /home/${{ secrets.EC2_USERNAME }}/.env \
+              --env-file /home/${USER}/.env \
               --restart unless-stopped \
-              \${REMOTE_IMAGE}
+              ${REMOTE_IMAGE}
 
-            sudo docker system prune -a -f --volumes
-EOF
+            # 불필요한 이미지/볼륨 정리
+            sudo docker system prune -a -f --volumes || true
+            SSH_EOF
