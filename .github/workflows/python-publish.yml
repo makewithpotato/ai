@@ -1,14 +1,15 @@
 name: Python CI with FastAPI & Docker Deploy
 
 on:
-  pull_request:
+  pull_request: 
     types:
       - closed
     branches:
       - main
+
   push:
     branches: [ "main" ]
-
+      
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
@@ -40,7 +41,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # 5. make .env file
+      # 5. Create .env file
       - name: make .env file
         run: |
           touch .env
@@ -67,7 +68,6 @@ jobs:
           RUN pip install --no-cache-dir -r requirements.txt
           
           COPY . .
-          
           COPY .env .env
           
           EXPOSE 8080
@@ -88,23 +88,23 @@ jobs:
 
       # 9. Push image to Docker Hub
       - name: Push to Docker Hub
-        run: docker push ${{ secrets.DOCKERHUB_USERNAME }}/ai-app
+        run: docker push ${{ secrets.DOCKERHUB_USERNAME }}/ai-app:latest
 
-      # 10. Deploy to EC2
+      # 10. Deploy to EC2 (❗ 들여쓰기 반드시 jobs 안으로)
       - name: Deploy to EC2
         run: |
           IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/ai-app:latest
           CONTAINER_NAME=ai_app
-
           echo "${{ secrets.EC2_PRIVATE_KEY }}" > deploy_key.pem
           chmod 600 deploy_key.pem
 
-          # EC2에 .env 업로드
+          # 업로드용 .env 생성
           echo "${{ secrets.ENV_FILE }}" | base64 --decode > .env
+
+          # .env 파일 EC2로 업로드
           scp -i deploy_key.pem -o StrictHostKeyChecking=no .env \
               ${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }}:/home/${{ secrets.EC2_USERNAME }}/.env
 
-          # EC2 내부 명령 실행
           ssh -i deploy_key.pem -o StrictHostKeyChecking=no \
               ${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }} << EOF
             REMOTE_IMAGE=${IMAGE}
