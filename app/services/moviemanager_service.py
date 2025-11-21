@@ -14,52 +14,39 @@ def load_prompts() -> Dict[str, str]:
     """
     prompts.txt 파일에서 프롬프트 템플릿을 로드합니다.
     """
-    try:
-        prompts_file_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "prompts.txt")
-        
-        with open(prompts_file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        
-        prompts = {}
-        # 줄 단위로 파싱하여 섹션을 식별
-        lines = content.split('\n')
-        current_section = None
-        current_content = []
-        
-        for line in lines:
-            # 섹션 헤더 식별 (줄의 시작과 끝이 []로 둘러싸인 경우)
-            if line.strip().startswith('[') and line.strip().endswith(']') and not line.strip().startswith('[현재') and not line.strip().startswith('[등장'):
-                # 이전 섹션 저장
-                if current_section and current_content:
-                    prompts[current_section] = '\n'.join(current_content).strip()
-                
-                # 새 섹션 시작
-                current_section = line.strip()[1:-1]  # [ ] 제거
-                current_content = []
-            else:
-                # 섹션 내용 추가
-                if current_section:
-                    current_content.append(line)
-        
-        # 마지막 섹션 저장
-        if current_section and current_content:
-            prompts[current_section] = '\n'.join(current_content).strip()
-        
-        print(f"📄 프롬프트 템플릿 로드 완료: {list(prompts.keys())}")
-        return prompts
-        
-    except FileNotFoundError:
-        print("⚠️ prompts.txt 파일을 찾을 수 없습니다. 기본 프롬프트를 사용합니다.")
-        return {
-            "VIDEO_ANALYSIS_PROMPT": "[등장인물 정보]\n{characters_info}\n\n다음은 연속된 비디오 시리즈의 일부입니다.{context}[현재 영상의 대화 내용]\n{conversation}\n\n[현재 영상의 장면별 시작 시각]\n{scene_times}\n\n등장인물 정보와 최근 영상들의 맥락을 고려하여 현재 영상에 대해:\n1. 각 장면이 보여주는 상황을 설명해주세요\n2. 대화 내용과 연관지어 설명해주세요\n3. 최근 영상들과의 연결점이나 스토리 진행을 분석해주세요\n\n현재 영상의 내용을 요약해주세요.",
-            "FINAL_SUMMARY_PROMPT": "[등장인물 정보]\n{characters_info}\n\n다음은 연속된 비디오 시리즈의 각 영상별 요약입니다:\n\n{all_summaries}\n\n등장인물 정보와 위 내용을 바탕으로:\n1. 전체 스토리의 흐름을 정리해주세요\n2. 주요 등장인물과 그들의 관계를 설명해주세요\n3. 핵심 사건들과 갈등 구조를 분석해주세요\n4. 전체 영상 시리즈의 주제와 메시지를 요약해주세요\n\n최종적으로 전체 영상 시리즈에 대한 종합적인 요약을 제공해주세요."
-        }
-    except Exception as e:
-        print(f"⚠️ 프롬프트 로드 중 오류: {str(e)}. 기본 프롬프트를 사용합니다.")
-        return {
-            "VIDEO_ANALYSIS_PROMPT": "[등장인물 정보]\n{characters_info}\n\n다음은 연속된 비디오 시리즈의 일부입니다.{context}[현재 영상의 대화 내용]\n{conversation}\n\n[현재 영상의 장면별 시작 시각]\n{scene_times}\n\n등장인물 정보와 최근 영상들의 맥락을 고려하여 현재 영상에 대해:\n1. 각 장면이 보여주는 상황을 설명해주세요\n2. 대화 내용과 연관지어 설명해주세요\n3. 최근 영상들과의 연결점이나 스토리 진행을 분석해주세요\n\n현재 영상의 내용을 요약해주세요.",
-            "FINAL_SUMMARY_PROMPT": "[등장인물 정보]\n{characters_info}\n\n다음은 연속된 비디오 시리즈의 각 영상별 요약입니다:\n\n{all_summaries}\n\n등장인물 정보와 위 내용을 바탕으로:\n1. 전체 스토리의 흐름을 정리해주세요\n2. 주요 등장인물과 그들의 관계를 설명해주세요\n3. 핵심 사건들과 갈등 구조를 분석해주세요\n4. 전체 영상 시리즈의 주제와 메시지를 요약해주세요\n\n최종적으로 전체 영상 시리즈에 대한 종합적인 요약을 제공해주세요."
-        }
+    prompts_file_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "prompts.txt")
+    
+    with open(prompts_file_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    prompts = {}
+    # 줄 단위로 파싱하여 섹션을 식별
+    lines = content.split('\n')
+    current_section = None
+    current_content = []
+    
+    for line in lines:
+        # 섹션 헤더 식별 (줄의 시작과 끝이 []로 둘러싸인 경우)
+        if line.strip().startswith('[') and line.strip().endswith(']') and not line.strip().startswith('[현재') and not line.strip().startswith('[등장'):
+            # 이전 섹션 저장
+            if current_section and current_content:
+                prompts[current_section] = '\n'.join(current_content).strip()
+            
+            # 새 섹션 시작
+            current_section = line.strip()[1:-1]  # [ ] 제거
+            current_content = []
+        else:
+            # 섹션 내용 추가
+            if current_section:
+                current_content.append(line)
+    
+    # 마지막 섹션 저장
+    if current_section and current_content:
+        prompts[current_section] = '\n'.join(current_content).strip()
+    
+    print(f"📄 프롬프트 템플릿 로드 완료: {list(prompts.keys())}")
+    return prompts
+
 
 def natural_sort_key(s: str) -> List:
     """
