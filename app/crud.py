@@ -117,3 +117,9 @@ def get_summaries_up_to(db: Session, movie_id: int, summary_id: int) -> List[Mov
              .filter(MovieManagerSummary.summary_id <= summary_id)\
              .order_by(MovieManagerSummary.summary_id)\
              .all() 
+
+def get_custom_prompts(db: Session, movie_id: int) -> Optional[List[str]]:
+    """영화의 커스텀 프롬프트들 조회"""
+    summaries = db.query(Movie).filter(Movie.id == movie_id).first()
+    if summaries and summaries.custom_prompts:
+        return summaries.custom_prompts
