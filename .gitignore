@@ -2,3 +2,5 @@
 potato
 .DS_Store
 __pycache__/
+prompts.txt
+.vscode
