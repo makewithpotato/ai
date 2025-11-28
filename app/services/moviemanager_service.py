@@ -6,7 +6,7 @@ from typing import List, Dict
 from app.services.transcribe_service import transcribe_video
 from app.services.scene_service import get_video_scenes
 from app.services.video_chunk_service import generate_video_chunks_info, extract_chunk_for_processing, cleanup_chunk_file
-from app.crud import create_or_update_summary, get_summaries, get_summaries_up_to, delete_summaries_from, update_movie_status, mark_movie_failed, get_resume_info, get_movie
+from app.crud import create_or_update_summary, get_summaries_up_to, delete_summaries_from, update_movie_status, mark_movie_failed, get_resume_info, get_movie, get_custom_prompts
 from app.database import SessionLocal
 import asyncio
 
@@ -14,52 +14,39 @@ def load_prompts() -> Dict[str, str]:
     """
     prompts.txt 파일에서 프롬프트 템플릿을 로드합니다.
     """
-    try:
-        prompts_file_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "prompts.txt")
-        
-        with open(prompts_file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        
-        prompts = {}
-        # 줄 단위로 파싱하여 섹션을 식별
-        lines = content.split('\n')
-        current_section = None
-        current_content = []
-        
-        for line in lines:
-            # 섹션 헤더 식별 (줄의 시작과 끝이 []로 둘러싸인 경우)
-            if line.strip().startswith('[') and line.strip().endswith(']') and not line.strip().startswith('[현재') and not line.strip().startswith('[등장'):
-                # 이전 섹션 저장
-                if current_section and current_content:
-                    prompts[current_section] = '\n'.join(current_content).strip()
-                
-                # 새 섹션 시작
-                current_section = line.strip()[1:-1]  # [ ] 제거
-                current_content = []
-            else:
-                # 섹션 내용 추가
-                if current_section:
-                    current_content.append(line)
-        
-        # 마지막 섹션 저장
-        if current_section and current_content:
-            prompts[current_section] = '\n'.join(current_content).strip()
-        
-        print(f"📄 프롬프트 템플릿 로드 완료: {list(prompts.keys())}")
-        return prompts
-        
-    except FileNotFoundError:
-        print("⚠️ prompts.txt 파일을 찾을 수 없습니다. 기본 프롬프트를 사용합니다.")
-        return {
-            "VIDEO_ANALYSIS_PROMPT": "[등장인물 정보]\n{characters_info}\n\n다음은 연속된 비디오 시리즈의 일부입니다.{context}[현재 영상의 대화 내용]\n{conversation}\n\n[현재 영상의 장면별 시작 시각]\n{scene_times}\n\n등장인물 정보와 최근 영상들의 맥락을 고려하여 현재 영상에 대해:\n1. 각 장면이 보여주는 상황을 설명해주세요\n2. 대화 내용과 연관지어 설명해주세요\n3. 최근 영상들과의 연결점이나 스토리 진행을 분석해주세요\n\n현재 영상의 내용을 요약해주세요.",
-            "FINAL_SUMMARY_PROMPT": "[등장인물 정보]\n{characters_info}\n\n다음은 연속된 비디오 시리즈의 각 영상별 요약입니다:\n\n{all_summaries}\n\n등장인물 정보와 위 내용을 바탕으로:\n1. 전체 스토리의 흐름을 정리해주세요\n2. 주요 등장인물과 그들의 관계를 설명해주세요\n3. 핵심 사건들과 갈등 구조를 분석해주세요\n4. 전체 영상 시리즈의 주제와 메시지를 요약해주세요\n\n최종적으로 전체 영상 시리즈에 대한 종합적인 요약을 제공해주세요."
-        }
-    except Exception as e:
-        print(f"⚠️ 프롬프트 로드 중 오류: {str(e)}. 기본 프롬프트를 사용합니다.")
-        return {
-            "VIDEO_ANALYSIS_PROMPT": "[등장인물 정보]\n{characters_info}\n\n다음은 연속된 비디오 시리즈의 일부입니다.{context}[현재 영상의 대화 내용]\n{conversation}\n\n[현재 영상의 장면별 시작 시각]\n{scene_times}\n\n등장인물 정보와 최근 영상들의 맥락을 고려하여 현재 영상에 대해:\n1. 각 장면이 보여주는 상황을 설명해주세요\n2. 대화 내용과 연관지어 설명해주세요\n3. 최근 영상들과의 연결점이나 스토리 진행을 분석해주세요\n\n현재 영상의 내용을 요약해주세요.",
-            "FINAL_SUMMARY_PROMPT": "[등장인물 정보]\n{characters_info}\n\n다음은 연속된 비디오 시리즈의 각 영상별 요약입니다:\n\n{all_summaries}\n\n등장인물 정보와 위 내용을 바탕으로:\n1. 전체 스토리의 흐름을 정리해주세요\n2. 주요 등장인물과 그들의 관계를 설명해주세요\n3. 핵심 사건들과 갈등 구조를 분석해주세요\n4. 전체 영상 시리즈의 주제와 메시지를 요약해주세요\n\n최종적으로 전체 영상 시리즈에 대한 종합적인 요약을 제공해주세요."
-        }
+    prompts_file_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "prompts.txt")
+    
+    with open(prompts_file_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    prompts = {}
+    # 줄 단위로 파싱하여 섹션을 식별
+    lines = content.split('\n')
+    current_section = None
+    current_content = []
+    
+    for line in lines:
+        # 섹션 헤더 식별 (줄의 시작과 끝이 []로 둘러싸인 경우)
+        if line.strip().startswith('[') and line.strip().endswith(']') and not line.strip().startswith('[현재') and not line.strip().startswith('[등장'):
+            # 이전 섹션 저장
+            if current_section and current_content:
+                prompts[current_section] = '\n'.join(current_content).strip()
+            
+            # 새 섹션 시작
+            current_section = line.strip()[1:-1]  # [ ] 제거
+            current_content = []
+        else:
+            # 섹션 내용 추가
+            if current_section:
+                current_content.append(line)
+    
+    # 마지막 섹션 저장
+    if current_section and current_content:
+        prompts[current_section] = '\n'.join(current_content).strip()
+    
+    print(f"📄 프롬프트 템플릿 로드 완료: {list(prompts.keys())}")
+    return prompts
+
 
 def natural_sort_key(s: str) -> List:
     """
@@ -333,7 +320,7 @@ def collect_thumbnail_info(video_summaries: List[Dict], s3_video_uri: str = None
             "urls": []
         }
 
-async def create_final_summary(video_summaries: List[str], characters_info: str) -> str:
+async def create_final_results(video_summaries: List[str], custom_prompts: List[str], characters_info: str) -> List[tuple]:
     """
     모든 비디오 요약을 종합하여 최종 요약을 생성합니다.
     """
@@ -344,58 +331,67 @@ async def create_final_summary(video_summaries: List[str], characters_info: str)
     model_id = os.getenv("CLAUDE_MODEL_ID")
 
     # 프롬프트 템플릿 로드
-    prompts = load_prompts()
-    template = prompts.get("FINAL_SUMMARY_PROMPT", "")
+    pre_prompts = load_prompts()
+
+    # 각 입력 프롬프트 가져오기.
+    template = pre_prompts.get("FINAL_SUMMARY_PROMPT", "")
 
     # 모든 요약을 하나로 합침
     all_summaries = "\n\n".join([
         f"영상 {i+1}:\n{summary}" 
         for i, summary in enumerate(video_summaries)
     ])
-    
-    # 템플릿에 변수 삽입
-    prompt = template.format(
-        characters_info=characters_info,
-        all_summaries=all_summaries
-    )
 
-    # 디버깅: 최종 요약 프롬프트 출력
-    print("=" * 80)
-    print("🎬 FINAL SUMMARY PROMPT INPUT:")
-    print("=" * 80)
-    print(prompt)
-    print("=" * 80)
+    final_responses = []
 
-    request_body = {
-        "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 4096,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": prompt
-                    }
-                ]
-            }
-        ]
-    }
-    
-    response = bedrock.invoke_model(
+    # get all prompts and answers
+    for index, current_prompt in enumerate(custom_prompts):
+        prompt = current_prompt + "\nthe sentence bleow describes the video.\n" + all_summaries\
+        + "\nthe sentence below shows the information of the character\n" + characters_info
+
+        # 디버깅: 최종 요약 프롬프트 출력
+        print("=" * 80)
+        print(f"🎬 FINAL SUMMARY PROMPT INPUT {index + 1}:")
+        print("=" * 80)
+        print(prompt)
+        print("=" * 80)
+
+        request_body = {
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": 4096,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": prompt
+                        }
+                    ]
+                }
+            ]
+        }
+
+        response = bedrock.invoke_model(
         modelId=model_id,
         body=json.dumps(request_body)
-    )
-    response_body = json.loads(response['body'].read())
-    final_response = response_body['content'][0]['text']
-    
-    # 디버깅: 최종 요약 답변 출력
-    print("🎭 FINAL SUMMARY RESPONSE:")
-    print("=" * 80)
-    print(final_response)
-    print("=" * 80)
-    
-    return final_response
+        )
+
+        response_body = json.loads(response['body'].read())
+        final_response = response_body['content'][0]['text']
+        
+        # 디버깅: 최종 요약 답변 출력
+        print(f"🎭 SUMMARY RESPONSE {index + 1}:")
+        print("=" * 80)
+        print(final_response)
+        print("=" * 80)
+
+        result_tuple = (current_prompt, final_response)
+        
+        final_responses.append(result_tuple)
+
+    return final_responses
+
 
 async def process_single_video(s3_video_uri: str, characters_info: str, movie_id: int, 
                               segment_duration: int = 600, init: bool = False, 
@@ -600,10 +596,16 @@ async def process_single_video(s3_video_uri: str, characters_info: str, movie_id
         update_movie_status(db, movie_id, "ORGANIZING")
         db.close()
         print(f"📊 Movie 상태 업데이트: ORGANIZING")
+
+        # 커스텀 프롬프트 가져오기
+        db = SessionLocal()
+        custom_prompts = get_custom_prompts(db, movie_id)
+        db.close()
+        print(f"프롬프트 {len(custom_prompts)}개 로드 완료 for 최종 요약 생성")
         
-        print("🎭 최종 종합 요약 생성 중...")
-        # 최종 종합 요약 생성
-        final_summary = await create_final_summary([vs["summary"] for vs in video_summaries], characters_info)
+        print("🎭 최종 프롬프트 응답 결과 생성 중...")   
+        # 최종 프롬프트 응답 결과 생성
+        final_summary = await create_final_results([vs["summary"] for vs in video_summaries], custom_prompts, characters_info)
         print(f"✅ 최종 요약 생성 완료 (길이: {len(final_summary)} 문자)")
         
         # 최종 요약도 데이터베이스에 저장 (모든 청크 다음 순서)
@@ -626,15 +628,14 @@ async def process_single_video(s3_video_uri: str, characters_info: str, movie_id
         print("🎉 모든 청크 처리 완료!")
         print("=" * 80)
         
-        # 최종 요약을 줄거리와 평론으로 분리
-        parsed_summary = parse_final_summary(final_summary)
+        # 최종 요약을 줄거리와 평론으로 분리 (이제 필요 없다.)
+        # parsed_summary = parse_final_summary(final_summary)
         
         # 썸네일 정보 수집
         thumbnail_info = collect_thumbnail_info(video_summaries, s3_video_uri)
         
         return {
-            "final_story": parsed_summary["story"],
-            "final_review": parsed_summary["review"],
+            "prompt2results": final_summary,
             "thumbnail_folder_uri": thumbnail_info["folder_uri"]
         }
         
@@ -894,10 +895,16 @@ async def process_videos_from_folder(s3_folder_path: str, characters_info: str, 
         update_movie_status(db, movie_id, "ORGANIZING")
         db.close()
         print(f"📊 Movie 상태 업데이트: ORGANIZING")
+
+        # 커스텀 프롬프트 가져오기
+        db = SessionLocal()
+        custom_prompts = get_custom_prompts(db, movie_id)
+        db.close()
+        print(f"프롬프트 {len(custom_prompts)}개 로드 완료 for 최종 요약 생성")
         
         print("🎭 최종 종합 요약 생성 중...")
-        # 최종 종합 요약 생성
-        final_summary = await create_final_summary([vs["summary"] for vs in video_summaries], characters_info)
+        # 최종 프롬프트 응답 결과 생성
+        final_summary = await create_final_results([vs["summary"] for vs in video_summaries], custom_prompts, characters_info)
         print(f"✅ 최종 요약 생성 완료 (길이: {len(final_summary)} 문자)")
         
         # 최종 요약도 데이터베이스에 저장 (모든 비디오 다음 순서)
@@ -920,7 +927,7 @@ async def process_videos_from_folder(s3_folder_path: str, characters_info: str, 
         print("🎉 모든 비디오 처리 완료!")
         print("=" * 80)
         
-        # 최종 요약을 줄거리와 평론으로 분리
+        # 최종 요약을 줄거리와 평론으로 분리 (이제 필요 없다.)
         parsed_summary = parse_final_summary(final_summary)
         
         # 썸네일 정보 수집 (폴더 모드에서는 폴더 URI 없음)

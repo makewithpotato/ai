@@ -1,6 +1,7 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, BigInteger
+from sqlalchemy import Column, String, Text, DateTime, ForeignKey, BigInteger
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
+from sqlalchemy.dialects.postgresql import ARRAY
 from app.database import Base
 
 class Movie(Base):
@@ -11,6 +12,8 @@ class Movie(Base):
     status = Column(String(50), default="PENDING")  # PENDING, PROCEEDING[N/M], ORGANIZING, COMPLETE, FAILED_*
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    custom_prompts = Column(ARRAY(String), nullable=True)
     
     # 관계 설정
     summaries = relationship("MovieManagerSummary", back_populates="movie")
