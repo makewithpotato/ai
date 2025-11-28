@@ -90,6 +90,5 @@ class MovieManagerRequest(BaseModel):
     threshold: float = 30.0
 
 class MovieManagerResponse(BaseModel):
-    final_story: str  # 전체 줄거리
-    final_review: str  # 전체 평론
+    prompt2results: List[tuple]
     thumbnail_folder_uri: str = None  # 썸네일 후보 폴더 URI

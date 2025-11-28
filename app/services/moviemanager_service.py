@@ -629,14 +629,13 @@ async def process_single_video(s3_video_uri: str, characters_info: str, movie_id
         print("=" * 80)
         
         # 최종 요약을 줄거리와 평론으로 분리 (이제 필요 없다.)
-        parsed_summary = parse_final_summary(final_summary)
+        # parsed_summary = parse_final_summary(final_summary)
         
         # 썸네일 정보 수집
         thumbnail_info = collect_thumbnail_info(video_summaries, s3_video_uri)
         
         return {
-            "final_story": parsed_summary["story"],
-            "final_review": parsed_summary["review"],
+            "prompt2results": final_summary,
             "thumbnail_folder_uri": thumbnail_info["folder_uri"]
         }
         
