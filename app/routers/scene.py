@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException
-from app.services.scene_service import get_video_scenes
+from app.services.scene_service import scene_process
 from app.schemas import SceneRequest, SceneResponse
 from typing import List
 
@@ -14,7 +14,7 @@ def detect_scenes_endpoint(req: SceneRequest):
         raise HTTPException(status_code=400, detail="s3_video_uri는 's3://'로 시작해야 합니다.")
     
     try:
-        scenes = get_video_scenes(
+        scenes = scene_process(
             s3_uri=req.s3_video_uri,
             threshold=req.threshold
         )

@@ -4,9 +4,9 @@ import boto3
 import re
 from typing import List, Dict
 from app.services.transcribe_service import transcribe_video
-from app.services.scene_service import get_video_scenes
+from app.services.scene_service import scene_process, download_json_from_s3
 from app.services.video_chunk_service import generate_video_chunks_info, extract_chunk_for_processing, cleanup_chunk_file
-from app.crud import create_or_update_summary, get_summaries_up_to, delete_summaries_from, update_movie_status, mark_movie_failed, get_resume_info, get_movie, get_custom_prompts
+from app.crud import create_or_update_summary, get_summaries_up_to, delete_summaries_from, update_movie_status, mark_movie_failed, get_resume_info, get_movie, get_custom_prompts, get_custom_retrievals
 from app.database import SessionLocal
 import asyncio
 
@@ -320,6 +320,34 @@ def collect_thumbnail_info(video_summaries: List[Dict], s3_video_uri: str = None
             "urls": []
         }
 
+async def get_final_scenes(custom_retrievals: List[str]) -> List[Dict]:
+    """
+    커스텀 검색어들을 사용하여 최종 장면 검색 결과를 생성합니다.
+
+    1. 데이터베이스에서 movie에 임베딩 존재하는지 확인하기.
+    2. 임베딩 존재하면 s3 접근하여 임베딩 벡터 리스트 가져오기.
+    3. 가져온 벡터들 중 일정 이상 유사한 벡터 여러 개 선택.
+    4. 선택한 벡터들에 해당하는 S3 이미지(장면) URI 반환.
+    """
+
+    pass
+
+    # db = SessionLocal()
+    # embedding_uri = get_embedding_uri(db, movie_id, 1)  # movie에 저장된 임베딩 존재하는지 확인
+    # db.close()
+    # if not embedding_uri:
+    #     raise ValueError("해당 영화에 대한 임베딩이 존재하지 않습니다. 먼저 영화를 처리해야 합니다.")
+    
+    # print(f"📊 임베딩 URI: {embedding_uri}")
+
+    # # S3에서 임베딩 벡터 리스트 가져오기
+    # embeddings = download_json_from_s3(embedding_uri)
+
+
+
+    
+    
+
 async def create_final_results(video_summaries: List[str], custom_prompts: List[str], characters_info: str) -> List[tuple]:
     """
     모든 비디오 요약을 종합하여 최종 요약을 생성합니다.
@@ -528,9 +556,9 @@ async def process_single_video(s3_video_uri: str, characters_info: str, movie_id
                 # 청크를 임시 S3에 업로드하지 않고 로컬 파일 URI로 처리
                 chunk_uri = f"file://{chunk_file_path}"
                 
-                # transcribe와 scene 병렬 처리 (movie_id와 original_uri 전달)
+                # transcribe process와 scene process 병렬 처리
                 transcribe_task = asyncio.to_thread(transcribe_video, chunk_uri, language_code)
-                scene_task = asyncio.to_thread(get_video_scenes, chunk_uri, threshold, movie_id, s3_video_uri)
+                scene_task = asyncio.to_thread(scene_process, chunk_uri, threshold, movie_id, s3_video_uri)
                 utterances, scenes = await asyncio.gather(transcribe_task, scene_task)
                 
                 print(f"✅ STT 결과: {len(utterances) if utterances else 0}개의 발화")
@@ -600,14 +628,20 @@ async def process_single_video(s3_video_uri: str, characters_info: str, movie_id
         # 커스텀 프롬프트 가져오기
         db = SessionLocal()
         custom_prompts = get_custom_prompts(db, movie_id)
+        custom_retrievals = get_custom_retrievals(db, movie_id)
         db.close()
-        print(f"프롬프트 {len(custom_prompts)}개 로드 완료 for 최종 요약 생성")
+        print(f"프롬프트 {len(custom_prompts)}개, 검색어 {len(custom_retrievals)}개 로드 완료")
         
-        print("🎭 최종 프롬프트 응답 결과 생성 중...")   
+        print("🎭 최종 프롬프트 응답 결과 생성 중...")
         # 최종 프롬프트 응답 결과 생성
         final_summary = await create_final_results([vs["summary"] for vs in video_summaries], custom_prompts, characters_info)
         print(f"✅ 최종 요약 생성 완료 (길이: {len(final_summary)} 문자)")
-        
+
+        # 최종 장면 검색 결과 생성 (아래 함수는 위와 다르게 직접 db 조회를 통해 정보에 접근한다.)
+        #final_scenes = await get_final_scenes(custom_retrievals)
+        # s3 uri들의 리스트의 딕셔너리 형태가 되어야 할 것.
+        print(f"✅ 최종 장면 검색 결과 생성 완료 문자)")
+
         # 최종 요약도 데이터베이스에 저장 (모든 청크 다음 순서)
         print(f"💾 최종 요약 데이터베이스 저장 시작...")
         final_summary_id = total_chunks + 1  # 마지막 청크 다음 순서
@@ -835,7 +869,7 @@ async def process_videos_from_folder(s3_folder_path: str, characters_info: str, 
             
             # transcribe와 scene 병렬 처리 (movie_id 전달)
             transcribe_task = asyncio.to_thread(transcribe_video, video_uri, language_code)
-            scene_task = asyncio.to_thread(get_video_scenes, video_uri, threshold, movie_id)
+            scene_task = asyncio.to_thread(scene_process, video_uri, threshold, movie_id)
             utterances, scenes = await asyncio.gather(transcribe_task, scene_task)
             
             print(f"✅ STT 결과: {len(utterances) if utterances else 0}개의 발화")
