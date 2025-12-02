@@ -14,6 +14,7 @@ class Movie(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     custom_prompts = Column(ARRAY(String), nullable=True)
+    custom_retrievals = Column(ARRAY(String), nullable=True)
     
     # 관계 설정
     summaries = relationship("MovieManagerSummary", back_populates="movie")
