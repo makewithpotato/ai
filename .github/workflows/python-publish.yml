@@ -44,7 +44,7 @@ jobs:
 
       - name: make prompts.txt file
         run: |
-          eecho "${{ secrets.PROMPTS_FILE }}" > prompts.txt
+          echo "${{ secrets.PROMPTS_FILE }}" > prompts.txt
           chmod 600 prompts.txt
           
       - name: Generate Dockerfile
