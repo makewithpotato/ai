@@ -4,9 +4,11 @@ import boto3
 from typing import List, Dict
 import cv2
 from scenedetect import detect, ContentDetector
+from app.services.marengo_service import embed_marengo
 import numpy as np
 import base64
 import uuid
+import json
 
 def get_output_bucket() -> str:
     """
@@ -41,6 +43,28 @@ def download_video_from_s3(s3_uri: str) -> str:
     except Exception as e:
         # 임시 파일 삭제
         os.unlink(temp_file.name)
+        raise e
+    
+def download_json_from_s3(s3_uri: str) -> Dict:
+    """
+    S3에서 JSON 파일을 다운로드하여 파싱합니다.
+    """
+    if not s3_uri.startswith("s3://"):
+        raise ValueError("s3_uri는 's3://'로 시작해야 합니다.")
+    
+    # S3 URI 파싱
+    bucket = s3_uri.split('/')[2]
+    key = '/'.join(s3_uri.split('/')[3:])
+    
+    # S3 클라이언트 생성
+    s3 = boto3.client('s3')
+    
+    try:
+        # S3에서 JSON 파일 다운로드
+        response = s3.get_object(Bucket=bucket, Key=key)
+        json_data = response['Body'].read().decode('utf-8')
+        return json.loads(json_data)
+    except Exception as e:
         raise e
 
 def frame_to_base64(frame: np.ndarray) -> str:
@@ -83,7 +107,7 @@ def save_frame_to_s3(frame: np.ndarray, prefix: str = "scenes") -> str:
         # 임시 파일 삭제
         os.unlink(temp_file.name)
 
-def detect_scenes(video_path: str, threshold: float = 30.0, max_scenes_count: int = 20, movie_id: int = None, original_uri: str = None) -> List[Dict]:
+def detect_and_embed_scenes(video_path: str, threshold: float = 30.0, max_scenes_count: int = 20, movie_id: int = None, original_uri: str = None) -> List[Dict]:
     """
     비디오에서 주요 장면을 감지하고 각 장면의 대표 프레임을 base64로 반환합니다.
     품질이 좋은 프레임은 S3 thumbnails/ 경로에도 저장합니다.
@@ -132,6 +156,8 @@ def detect_scenes(video_path: str, threshold: float = 30.0, max_scenes_count: in
             selected_scenes.append(closest_scene)
         scenes = selected_scenes
 
+    embed_uri_pairs = {}
+
     # 품질 검사 및 S3 저장 (최대 20개 장면에 대해서만 수행)
     if movie_id is not None:
         print(f"🔍 최대 {len(scenes)}개 장면에 대해 품질 검사 수행...")
@@ -149,8 +175,16 @@ def detect_scenes(video_path: str, threshold: float = 30.0, max_scenes_count: in
                 print(f"   선명도: {quality_check['sharpness']:.1f} ({'✅' if quality_check['sharpness_ok'] else '❌'})")
                 
                 if quality_check['is_good_quality']:
+                    # scene retrieval 과정 수행 필요
+                    # marengo_service에서 aws bedrock marengo embed model 호출하여 임베딩을 받아오는 함수 사용
+                    # 임베딩을 썸네일과 함께 S3에 저장, DB에 메타데이터 저장.
+                    
                     thumbnail_url = save_thumbnail_to_s3(frame, movie_id, video_name, scene_index + 1, original_uri)
                     scene_data['thumbnail_url'] = thumbnail_url
+
+                    embedded_vector = embed_marengo("image", scene_data["frame_image"])
+                    embed_uri_pairs[thumbnail_url] = embedded_vector
+
                     print(f"✅ Scene {scene_index + 1}: 품질 양호 → S3 저장 완료")
                 else:
                     print(f"⚠️ Scene {scene_index + 1}: 품질 부족 → S3 저장 생략")
@@ -158,12 +192,18 @@ def detect_scenes(video_path: str, threshold: float = 30.0, max_scenes_count: in
             except Exception as e:
                 print(f"❌ Scene {scene_index + 1} 처리 중 오류: {str(e)}")
 
+    if embed_uri_pairs:
+        save_json_to_s3(embed_uri_pairs, movie_id, video_name, original_uri=original_uri)
+        print(f"✅ 총 {len(embed_uri_pairs)}개 장면 임베딩 완료 및 S3 저장 완료.")
+    
     return scenes
 
-def get_video_scenes(uri: str, threshold: float = 30.0, movie_id: int = None, original_uri: str = None) -> List[Dict]:
+def scene_process(uri: str, threshold: float = 30.0, movie_id: int = None, original_uri: str = None) -> List[Dict]:
     """
-    비디오의 주요 장면을 감지하고 각 장면의 대표 프레임을 base64로 반환합니다.
-    품질이 좋은 프레임은 S3 thumbnails/ 경로에도 저장합니다.
+    전체 장면 처리 프로세스입니다. 다음과 같은 과정을 거칩니다.
+    1. 해당 비디오를 청크로 분할합니다.
+    2. 분할한 비디오 청크에서 pySceneDetect를 사용하여 장면을 감지합니다.
+    3. 우수한 장면은 S3에 저장되며, marengo를 통한 임베딩 역시 수행 후 저장됩니다. (임베딩 메타데이터는 DB에 저장)
     
     Args:
         uri: S3 URI (s3://) 또는 로컬 파일 URI (file://)
@@ -198,8 +238,8 @@ def get_video_scenes(uri: str, threshold: float = 30.0, movie_id: int = None, or
             raise ValueError("URI는 's3://' 또는 'file://'로 시작해야 합니다.")
         
         try:
-            # 장면 감지 (movie_id와 original_uri 전달)
-            scenes = detect_scenes(video_path, threshold, movie_id=movie_id, original_uri=original_uri)
+            # 다운로드받은 영상 장면 감지 직후 임베딩
+            scenes = detect_and_embed_scenes(video_path, threshold, movie_id=movie_id, original_uri=original_uri)
             return scenes
         finally:
             # 임시 파일 삭제 (S3에서 다운로드한 경우만)
@@ -243,6 +283,72 @@ def check_frame_quality(frame: np.ndarray) -> Dict[str, float]:
         "sharpness_ok": sharpness_ok,
         "is_good_quality": is_good_quality
     }
+
+def save_json_to_s3(dict_data: dict, movie_id: int, video_name: str, original_uri: str = None) -> str:
+    """
+    uri-임베딩 쌍을 원본 비디오와 같은 디렉토리의 embeddings/ 폴더에 저장합니다.
+    
+    Args:
+        dict_data: 저장할 JSON 데이터
+        movie_id: 영화 ID
+        video_name: 비디오 파일명
+        original_uri: 원본 비디오 URI (디렉토리 구조 유지용)
+    
+    Returns:
+        str: S3 URL
+    """
+    # S3 클라이언트 생성
+    s3 = boto3.client('s3')
+    
+    # 출력 버킷 가져오기
+    output_bucket = get_output_bucket()
+    
+    # JSON 데이터를 문자열로 변환
+    json_data = json.dumps(dict_data)
+    
+    try:
+        # 썸네일 저장 경로 결정
+        if original_uri and original_uri.startswith("s3://"):
+            # 원본 비디오 URI에서 디렉토리 구조 추출
+            # 예: s3://bucket/movies/series1/episode1.mp4 → movies/series1/embeddings/
+            uri_parts = original_uri.replace("s3://", "").split("/")
+            bucket_from_uri = uri_parts[0]
+            
+            if len(uri_parts) > 1:
+                # 디렉토리 부분 추출 (파일명 제외)
+                directory_path = "/".join(uri_parts[1:-1])
+                if directory_path:
+                    # 같은 디렉토리에 embeddings 폴더 생성
+                    embeddings_dir = f"{directory_path}/embeddings"
+                else:
+                    # 루트 디렉토리인 경우
+                    embeddings_dir = "embeddings"
+            else:
+                # 버킷 루트인 경우
+                embeddings_dir = "embeddings"
+        else:
+            # original_uri가 없거나 S3 URI가 아닌 경우 기본 경로 사용
+            embeddings_dir = f"embeddings/{movie_id}"
+        
+        # 파일명 생성
+        filename = "embeddings.json"
+        
+        # 최종 S3 키 생성
+        key = f"{embeddings_dir}/{filename}"
+        
+        # S3에 업로드
+        s3.put_object(Body=json_data, Bucket=output_bucket, Key=key, ContentType='application/json')
+        
+        # 공개 URL 생성 (또는 presigned URL)
+        url = f"https://{output_bucket}.s3.amazonaws.com/{key}"
+        
+        print(f"✅ 임베딩 저장 완료: {url}")
+        print(f"   경로: {key}")
+        return url
+        
+    except Exception as e:
+        print(f"❌ 임베딩 저장 실패: {str(e)}")
+        raise e
 
 def save_thumbnail_to_s3(frame: np.ndarray, movie_id: int, video_name: str, scene_index: int, original_uri: str = None) -> str:
     """

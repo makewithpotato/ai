@@ -1,6 +1,7 @@
 # app/services/marengo_service.py
 
 from dotenv import load_dotenv
+from typing import List
 import boto3
 import os
 import json
@@ -33,15 +34,27 @@ def init_marengo_client():
         aws_access_key_id=aws_key,
         aws_secret_access_key=aws_secret)
 
-def get_marengo_response(user_message: str) -> str:
+def embed_marengo(input_type: str, input: str) -> List[float]:
     """
-    Bedrock Marengo API를 호출하여 텍스트 응답을 반환합니다.
+    Bedrock Marengo API를 호출하여 임베딩 벡터를 반환합니다.
     """
 
-    message = {
-        "inputType": "text",
-        "inputText": user_message
-    }
+    if input_type not in ["text", "image"]:
+        raise ValueError("input_type은 'text' 또는 'image'여야 합니다.")
+    
+    if input_type == "text":
+        message = {
+            "inputType": input_type,
+            "inputText": input
+        }
+
+    if input_type == "image":
+        message = {
+            "inputType": input_type,
+            "mediaSource": {
+                "base64String": input
+            }
+        }
 
     if marengo_client is None:
         raise RuntimeError("Marengo Bedrock 클라이언트가 초기화되지 않았습니다.")
@@ -50,4 +63,11 @@ def get_marengo_response(user_message: str) -> str:
         body=json.dumps(message)
     )
 
-    return response.content
+    
+
+    # response["body"]는 StreamingBody → .read() 필요
+    result = json.loads(response["body"].read())
+
+    embedding = result['data'][0]['embedding']
+
+    return embedding

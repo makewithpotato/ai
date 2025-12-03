@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from app.services.transcribe_service import transcribe_video
-from app.services.scene_service import get_video_scenes
+from app.services.scene_service import scene_process
 from app.services.summarize_service import summarize_content
 from app.schemas import PipelineRequest, SummarizeResponse
 import asyncio
@@ -18,7 +18,7 @@ async def pipeline_endpoint(req: PipelineRequest):
     try:
         # 병렬 실행
         transcribe_task = asyncio.to_thread(transcribe_video, req.s3_video_uri, req.language_code)
-        scene_task = asyncio.to_thread(get_video_scenes, req.s3_video_uri, req.threshold)
+        scene_task = asyncio.to_thread(scene_process, req.s3_video_uri, req.threshold)
         utterances, scenes = await asyncio.gather(transcribe_task, scene_task)
         
         # scene의 base64 이미지와 start_time만 추출
