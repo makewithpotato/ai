@@ -10,14 +10,14 @@ from app.services.marengo_service import embed_marengo
 from app.crud import (
     create_or_update_summary, 
     get_summaries_up_to, 
-    delete_summaries_from, 
+    delete_summaries_from,
     update_movie_status, 
     mark_movie_failed,
     get_resume_info, 
     get_movie, 
     get_custom_prompts, 
     get_custom_retrievals, 
-    get_embedding_uri, 
+    get_embedding_uri,
     set_embedding_uri
 )
 from app.database import SessionLocal
@@ -616,7 +616,13 @@ async def process_single_video(s3_video_uri: str, characters_info: str, movie_id
                 # transcribe process와 scene process 병렬 처리
                 transcribe_task = asyncio.to_thread(transcribe_video, chunk_uri, language_code)
                 scene_task = asyncio.to_thread(scene_process, chunk_uri, threshold, movie_id, s3_video_uri)
-                utterances, scenes = await asyncio.gather(transcribe_task, scene_task)
+
+                utterances, (scenes, saved_uri) = await asyncio.gather(transcribe_task, scene_task)
+
+                db = SessionLocal()
+                set_embedding_uri(db, movie_id, saved_uri)  # 임베딩 URI 저장
+                db.close()
+                print(f"✅ 장면 임베딩 URI 저장 완료: {saved_uri}")
                 
                 print(f"✅ STT 결과: {len(utterances) if utterances else 0}개의 발화")
                 print(f"✅ 장면 감지: {len(scenes) if scenes else 0}개의 장면")
