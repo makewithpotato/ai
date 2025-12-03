@@ -107,7 +107,7 @@ def save_frame_to_s3(frame: np.ndarray, prefix: str = "scenes") -> str:
         # 임시 파일 삭제
         os.unlink(temp_file.name)
 
-def detect_and_embed_scenes(video_path: str, threshold: float = 30.0, max_scenes_count: int = 20, movie_id: int = None, original_uri: str = None) -> List[Dict]:
+def detect_and_embed_scenes(video_path: str, threshold: float = 30.0, max_scenes_count: int = 20, movie_id: int = None, original_uri: str = None) -> tuple[List[Dict], str]:
     """
     비디오에서 주요 장면을 감지하고 각 장면의 대표 프레임을 base64로 반환합니다.
     품질이 좋은 프레임은 S3 thumbnails/ 경로에도 저장합니다.
@@ -193,12 +193,12 @@ def detect_and_embed_scenes(video_path: str, threshold: float = 30.0, max_scenes
                 print(f"❌ Scene {scene_index + 1} 처리 중 오류: {str(e)}")
 
     if embed_uri_pairs:
-        save_json_to_s3(embed_uri_pairs, movie_id, video_name, original_uri=original_uri)
+        saved_uri = save_json_to_s3(embed_uri_pairs, movie_id, video_name, original_uri=original_uri)
         print(f"✅ 총 {len(embed_uri_pairs)}개 장면 임베딩 완료 및 S3 저장 완료.")
     
-    return scenes
+    return scenes, saved_uri
 
-def scene_process(uri: str, threshold: float = 30.0, movie_id: int = None, original_uri: str = None) -> List[Dict]:
+def scene_process(uri: str, threshold: float = 30.0, movie_id: int = None, original_uri: str = None) -> tuple[List[Dict], str]:
     """
     전체 장면 처리 프로세스입니다. 다음과 같은 과정을 거칩니다.
     1. 해당 비디오를 청크로 분할합니다.
@@ -239,8 +239,8 @@ def scene_process(uri: str, threshold: float = 30.0, movie_id: int = None, origi
         
         try:
             # 다운로드받은 영상 장면 감지 직후 임베딩
-            scenes = detect_and_embed_scenes(video_path, threshold, movie_id=movie_id, original_uri=original_uri)
-            return scenes
+            scenes, saved_uri = detect_and_embed_scenes(video_path, threshold, movie_id=movie_id, original_uri=original_uri)
+            return scenes, saved_uri
         finally:
             # 임시 파일 삭제 (S3에서 다운로드한 경우만)
             if should_cleanup and video_path and os.path.exists(video_path):
@@ -339,12 +339,12 @@ def save_json_to_s3(dict_data: dict, movie_id: int, video_name: str, original_ur
         # S3에 업로드
         s3.put_object(Body=json_data, Bucket=output_bucket, Key=key, ContentType='application/json')
         
-        # 공개 URL 생성 (또는 presigned URL)
-        url = f"https://{output_bucket}.s3.amazonaws.com/{key}"
+        # S3 uri 생성
+        uri = f"s3://{output_bucket}/{key}"
         
-        print(f"✅ 임베딩 저장 완료: {url}")
+        print(f"✅ 임베딩 저장 완료: {uri}")
         print(f"   경로: {key}")
-        return url
+        return uri
         
     except Exception as e:
         print(f"❌ 임베딩 저장 실패: {str(e)}")
