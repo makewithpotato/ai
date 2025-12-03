@@ -120,6 +120,7 @@ jobs:
               --restart unless-stopped \
               ${IMAGE}
 
-            # 불필요한 이미지/볼륨 정리
-            sudo docker system prune -a -f --volumes || true
+            # 불필요한 이미지 정리
+            sudo docker image prune -a -f
+            
           SSH_EOF
