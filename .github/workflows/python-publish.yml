@@ -42,6 +42,11 @@ jobs:
           echo "${{ secrets.ENV_FILE }}" | base64 --decode > .env
           chmod 600 .env
 
+      - name: make prompts.txt file
+        run: |
+          echo "${{ secrets.PROMPTS_FILE }}" | base64 --decode > prompts.txt
+          chmod 600 prompts.txt
+          
       - name: Generate Dockerfile
         run: |
           cat > Dockerfile <<'DOCKERFILE'
