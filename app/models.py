@@ -12,6 +12,7 @@ class Movie(Base):
     status = Column(String(50), default="PENDING")  # PENDING, PROCEEDING[N/M], ORGANIZING, COMPLETE, FAILED_*
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    embedding_uri = Column(String(255), nullable=True)  # S3에 저장된 임베딩 벡터 URI
 
     custom_prompts = Column(ARRAY(String), nullable=True)
     custom_retrievals = Column(ARRAY(String), nullable=True)

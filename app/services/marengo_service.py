@@ -69,7 +69,5 @@ def embed_marengo(input_type: str, input: str) -> List[float]:
     result = json.loads(response["body"].read())
 
     embedding = result['data'][0]['embedding']
-    
-    print(type(embedding), len(embedding))
 
     return embedding

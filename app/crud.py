@@ -129,3 +129,17 @@ def get_custom_retrievals(db: Session, movie_id: int) -> Optional[List[str]]:
     movie = db.query(Movie).filter(Movie.id == movie_id).first()
     if movie and movie.custom_retrievals:
         return movie.custom_retrievals
+    
+def get_embedding_uri(db: Session, movie_id: int) -> Optional[str]:
+    """영화의 임베딩 S3 URI 조회"""
+    movie = db.query(Movie).filter(Movie.id == movie_id).first()
+    if movie:
+        return movie.embedding_uri
+    
+def set_embedding_uri(db: Session, movie_id: int, embedding_uri: str) -> Optional[str]:
+    """영화의 임베딩 S3 URI 설정"""
+    movie = db.query(Movie).filter(Movie.id == movie_id).first()
+    if movie:
+        movie.embedding_uri = embedding_uri
+        db.commit()
+        return movie.embedding_uri

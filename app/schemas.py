@@ -91,4 +91,5 @@ class MovieManagerRequest(BaseModel):
 
 class MovieManagerResponse(BaseModel):
     prompt2results: List[tuple]
+    retrieval2uris: dict[str, List[str]]
     thumbnail_folder_uri: str = None  # 썸네일 후보 폴더 URI
