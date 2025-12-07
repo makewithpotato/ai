@@ -88,6 +88,7 @@ class MovieManagerRequest(BaseModel):
     init: bool = False  # True: 처음부터 시작, False: 마지막 상태부터 재시작
     language_code: str = "ko-KR"
     threshold: float = 30.0
+    prompt_language: str = "kor"  # "kor" 또는 "eng"
 
 class MovieManagerResponse(BaseModel):
     prompt2results: List[tuple]

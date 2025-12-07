@@ -24,11 +24,14 @@ from app.database import SessionLocal
 import asyncio
 import numpy as np
 
-def load_prompts() -> Dict[str, str]:
+def load_prompts(language: str = "kor") -> Dict[str, str]:
     """
     prompts.txt 파일에서 프롬프트 템플릿을 로드합니다.
     """
-    prompts_file_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "prompts.txt")
+    if language == "eng":
+        prompts_file_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "prompts_eng.txt")
+    else:
+        prompts_file_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "prompts.txt")
     
     with open(prompts_file_path, 'r', encoding='utf-8') as f:
         content = f.read()
@@ -127,12 +130,12 @@ def get_video_files_from_s3_folder(s3_folder_path: str) -> List[str]:
     except Exception as e:
         raise RuntimeError(f"S3 폴더 조회 중 오류 발생: {str(e)}")
 
-def create_claude_prompt_with_context(utterances: List[Dict], scene_images: List[Dict], characters_info: str, previous_summaries: List[str] = None, current_video_index: int = 0) -> str:
+def create_claude_prompt_with_context(utterances: List[Dict], scene_images: List[Dict], characters_info: str, previous_summaries: List[str] = None, current_video_index: int = 0, prompt_language: str = "kor") -> str:
     """
     Rolling Context 기법으로 최근 3개 비디오 요약만 포함하여 Claude 프롬프트를 생성합니다.
     """
     # 프롬프트 템플릿 로드
-    prompts = load_prompts()
+    prompts = load_prompts(prompt_language)
     template = prompts.get("VIDEO_ANALYSIS_PROMPT", "")
     
     # 안전한 conversation 생성
@@ -177,7 +180,7 @@ def create_claude_prompt_with_context(utterances: List[Dict], scene_images: List
     
     return prompt
 
-async def get_bedrock_response_with_context(utterances: List[Dict], scene_images: List[Dict], characters_info: str, previous_summaries: List[str] = None, current_video_index: int = 0) -> str:
+async def get_bedrock_response_with_context(utterances: List[Dict], scene_images: List[Dict], characters_info: str, previous_summaries: List[str] = None, current_video_index: int = 0, prompt_language: str = "kor") -> str:
     """
     Rolling Context 기법으로 최근 3개 비디오 요약만 컨텍스트로 포함하여 Bedrock Claude 응답을 생성합니다.
     """
@@ -188,7 +191,7 @@ async def get_bedrock_response_with_context(utterances: List[Dict], scene_images
     model_id = os.getenv("CLAUDE_MODEL_ID")
 
     # 텍스트 프롬프트 생성 (Rolling Context 적용)
-    text_prompt = create_claude_prompt_with_context(utterances, scene_images, characters_info, previous_summaries, current_video_index)
+    text_prompt = create_claude_prompt_with_context(utterances, scene_images, characters_info, previous_summaries, current_video_index, prompt_language)
     
     # 디버깅: 프롬프트 출력
     print("=" * 80)
@@ -389,7 +392,7 @@ async def get_final_scenes(custom_retrievals: List[str], movie_id: int) -> Dict[
     
     
 
-async def create_final_results(video_summaries: List[str], custom_prompts: List[str], characters_info: str) -> List[tuple]:
+async def create_final_results(video_summaries: List[str], custom_prompts: List[str], characters_info: str, prompt_language: str = "kor") -> List[tuple]:
     """
     모든 비디오 요약을 종합하여 최종 요약을 생성합니다.
     """
@@ -400,7 +403,7 @@ async def create_final_results(video_summaries: List[str], custom_prompts: List[
     model_id = os.getenv("CLAUDE_MODEL_ID")
 
     # 프롬프트 템플릿 로드
-    pre_prompts = load_prompts()
+    pre_prompts = load_prompts(prompt_language)
 
     # 각 입력 프롬프트 가져오기.
     template = pre_prompts.get("FINAL_SUMMARY_PROMPT", "")
@@ -523,7 +526,7 @@ async def create_final_results(video_summaries: List[str], custom_prompts: List[
 
 async def process_single_video(s3_video_uri: str, characters_info: str, movie_id: int, 
                               segment_duration: int = 600, init: bool = False, 
-                              language_code: str = "ko-KR", threshold: float = 30.0) -> Dict:
+                              language_code: str = "ko-KR", threshold: float = 30.0, prompt_language: str = "kor") -> Dict:
     """
     원본 비디오 파일을 받아서 동적으로 청크를 추출하며 순차적으로 처리하여 각각의 요약과 최종 요약을 생성합니다.
     
@@ -692,7 +695,7 @@ async def process_single_video(s3_video_uri: str, characters_info: str, movie_id
                 
                 print(f"🤖 Claude 요약 생성 시작...")
                 # Rolling Context를 적용하여 현재 청크 요약 생성
-                summary = await get_bedrock_response_with_context(utterances, scene_images, characters_info, previous_summaries, i)
+                summary = await get_bedrock_response_with_context(utterances, scene_images, characters_info, previous_summaries, i, prompt_language)
                 print(f"✅ Claude 요약 생성 완료 (길이: {len(summary)} 문자)")
                 
                 # 요약을 데이터베이스에 저장 (청크 순서에 맞는 summary_id 사용)
@@ -748,7 +751,7 @@ async def process_single_video(s3_video_uri: str, characters_info: str, movie_id
         
         print("🎭 최종 프롬프트 응답 결과 생성 중...")
         # 최종 프롬프트 응답 결과 생성
-        final_summary = await create_final_results([vs["summary"] for vs in video_summaries], custom_prompts, characters_info)
+        final_summary = await create_final_results([vs["summary"] for vs in video_summaries], custom_prompts, characters_info, prompt_language)
         print(f"✅ 최종 요약 생성 완료")
 
         # 최종 장면 검색 결과 생성 (아래 함수는 위와 다르게 직접 db 조회를 통해 정보에 접근한다.)
