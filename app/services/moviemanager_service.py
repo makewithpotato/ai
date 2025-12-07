@@ -40,14 +40,14 @@ def load_prompts() -> Dict[str, str]:
     current_content = []
     
     for line in lines:
-        # 섹션 헤더 식별 (줄의 시작과 끝이 []로 둘러싸인 경우)
-        if line.strip().startswith('[') and line.strip().endswith(']') and not line.strip().startswith('[현재') and not line.strip().startswith('[등장'):
+        # 섹션 헤더 식별 (줄의 시작과 끝이 <<>>로 둘러싸인 경우)
+        if line.strip().startswith('<<') and line.strip().endswith('>>'):
             # 이전 섹션 저장
             if current_section and current_content:
                 prompts[current_section] = '\n'.join(current_content).strip()
             
             # 새 섹션 시작
-            current_section = line.strip()[1:-1]  # [ ] 제거
+            current_section = line.strip()[2:-2]  # << >> 제거
             current_content = []
         else:
             # 섹션 내용 추가
@@ -241,12 +241,13 @@ async def get_bedrock_response_with_context(utterances: List[Dict], scene_images
     
     return claude_response
 
-def parse_final_summary(final_summary_text: str) -> Dict[str, str]:
+def parse_final_summary(final_summary_text: str, expected_len: int) -> Dict[str, str]:
     """
     최종 요약에서 줄거리와 평론을 분리합니다.
     
     Args:
         final_summary_text: Claude에서 받은 최종 요약 텍스트
+        expected_len: 예상되는 분리된 부분의 개수 (예: 2)
         
     Returns:
         Dict: {"story": "줄거리", "review": "평론"}
@@ -255,31 +256,14 @@ def parse_final_summary(final_summary_text: str) -> Dict[str, str]:
         # ####### 구분자로 분리
         parts = final_summary_text.split("#######")
         
-        if len(parts) >= 2:
-            story = parts[0].strip()
-            review = parts[1].strip()
-            
-            print(f"📖 줄거리 추출 완료 (길이: {len(story)} 문자)")
-            print(f"📝 평론 추출 완료 (길이: {len(review)} 문자)")
-            
-            return {
-                "story": story,
-                "review": review
-            }
-        else:
-            # 구분자가 없는 경우 전체를 줄거리로 처리
-            print("⚠️ ####### 구분자를 찾을 수 없어 전체를 줄거리로 처리합니다.")
-            return {
-                "story": final_summary_text.strip(),
-                "review": "평론 정보가 없습니다."
-            }
+        # 오류 처리
+        if len(parts) != expected_len:
+            raise ValueError(f"예상된 부분 개수({expected_len})와 실제 개수({len(parts)})가 일치하지 않습니다.")
+        
+        return parts
             
     except Exception as e:
         print(f"❌ 최종 요약 파싱 중 오류: {str(e)}")
-        return {
-            "story": final_summary_text.strip(),
-            "review": "평론 파싱 중 오류가 발생했습니다."
-        }
 
 def collect_thumbnail_info(video_summaries: List[Dict], s3_video_uri: str = None) -> Dict[str, any]:
     """
@@ -427,52 +411,111 @@ async def create_final_results(video_summaries: List[str], custom_prompts: List[
         for i, summary in enumerate(video_summaries)
     ])
 
+    # 커스텀 프롬프트 목록 형태의 string으로 변환
+    custom_prompt_list = "\n".join(
+        f"{idx + 1}. {item}" for idx, item in enumerate(custom_prompts)
+        )
+
+    # 여러 프롬프트를 묶어서 한 번에 보내기
+    # 형식이 고정된 응답을 내도록 설계 필요
+    # 가져온 프롬프트 템플릿에 video_summaries, custom_prompts, characters_info 삽입
+    prompt = template.format(
+        all_summaries=all_summaries,
+        characters_info=characters_info,
+        custom_prompt_list=custom_prompt_list
+    )
+
     final_responses = []
 
     # get all prompts and answers
-    for index, current_prompt in enumerate(custom_prompts):
-        prompt = current_prompt + "\nthe sentence bleow describes the video.\n" + all_summaries\
-        + "\nthe sentence below shows the information of the character\n" + characters_info
+    # for index, current_prompt in enumerate(custom_prompts):
+    #     prompt = current_prompt + "\nthe sentence bleow describes the video.\n" + all_summaries\
+    #     + "\nthe sentence below shows the information of the character\n" + characters_info
 
-        # 디버깅: 최종 요약 프롬프트 출력
-        print("=" * 80)
-        print(f"🎬 FINAL SUMMARY PROMPT INPUT {index + 1}:")
-        print("=" * 80)
-        print(prompt)
-        print("=" * 80)
+    #     # 디버깅: 최종 요약 프롬프트 출력
+    #     print("=" * 80)
+    #     print(f"🎬 FINAL SUMMARY PROMPT INPUT {index + 1}:")
+    #     print("=" * 80)
+    #     print(prompt)
+    #     print("=" * 80)
 
-        request_body = {
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": 4096,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": prompt
-                        }
-                    ]
-                }
-            ]
-        }
+    #     request_body = {
+    #         "anthropic_version": "bedrock-2023-05-31",
+    #         "max_tokens": 4096,
+    #         "messages": [
+    #             {
+    #                 "role": "user",
+    #                 "content": [
+    #                     {
+    #                         "type": "text",
+    #                         "text": prompt
+    #                     }
+    #                 ]
+    #             }
+    #         ]
+    #     }
 
-        response = bedrock.invoke_model(
-        modelId=model_id,
-        body=json.dumps(request_body)
-        )
+    #     response = bedrock.invoke_model(
+    #     modelId=model_id,
+    #     body=json.dumps(request_body)
+    #     )
 
-        response_body = json.loads(response['body'].read())
-        final_response = response_body['content'][0]['text']
+    #     response_body = json.loads(response['body'].read())
+    #     final_response = response_body['content'][0]['text']
         
-        # 디버깅: 최종 요약 답변 출력
-        print(f"🎭 SUMMARY RESPONSE {index + 1}:")
-        print("=" * 80)
-        print(final_response)
-        print("=" * 80)
+    #     # 디버깅: 최종 요약 답변 출력
+    #     print(f"🎭 SUMMARY RESPONSE {index + 1}:")
+    #     print("=" * 80)
+    #     print(final_response)
+    #     print("=" * 80)
 
-        result_tuple = (current_prompt, final_response)
+    #     result_tuple = (current_prompt, final_response)
         
+    #     final_responses.append(result_tuple)
+
+    # 디버깅: 최종 요약 프롬프트 출력
+    print("=" * 80)
+    print(f"🎬 FINAL SUMMARY PROMPT INPUT:")
+    print("=" * 80)
+    print(prompt)
+    print("=" * 80)
+
+    # 프롬프트 보내기
+    request_body = {
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 4096,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": prompt
+                    }
+                ]
+            }
+        ]
+    }
+
+    response = bedrock.invoke_model(
+    modelId=model_id,
+    body=json.dumps(request_body)
+    )
+
+    response_body = json.loads(response['body'].read())
+    final_response = response_body['content'][0]['text']
+    
+    # 디버깅: 최종 요약 답변 출력
+    print(f"🎭 FINAL SUMMARY RESPONSE:")
+    print("=" * 80)
+    print(final_response)
+    print("=" * 80)
+
+    parsed_response_list = parse_final_summary(final_response, len(custom_prompts))
+
+    # 응답 파싱해서 List[tuple] 형태로 반환
+    for current_prompt, parsed_response in zip(custom_prompts, parsed_response_list):
+        result_tuple = (current_prompt, parsed_response)
         final_responses.append(result_tuple)
 
     return final_responses
