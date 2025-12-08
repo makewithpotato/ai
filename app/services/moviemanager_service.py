@@ -24,11 +24,14 @@ from app.database import SessionLocal
 import asyncio
 import numpy as np
 
-def load_prompts() -> Dict[str, str]:
+def load_prompts(language: str = "kor") -> Dict[str, str]:
     """
     prompts.txt 파일에서 프롬프트 템플릿을 로드합니다.
     """
-    prompts_file_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "prompts.txt")
+    if language == "eng":
+        prompts_file_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "prompts_eng.txt")
+    else:
+        prompts_file_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "prompts.txt")
     
     with open(prompts_file_path, 'r', encoding='utf-8') as f:
         content = f.read()
@@ -40,14 +43,14 @@ def load_prompts() -> Dict[str, str]:
     current_content = []
     
     for line in lines:
-        # 섹션 헤더 식별 (줄의 시작과 끝이 []로 둘러싸인 경우)
-        if line.strip().startswith('[') and line.strip().endswith(']') and not line.strip().startswith('[현재') and not line.strip().startswith('[등장'):
+        # 섹션 헤더 식별 (줄의 시작과 끝이 <<>>로 둘러싸인 경우)
+        if line.strip().startswith('<<') and line.strip().endswith('>>'):
             # 이전 섹션 저장
             if current_section and current_content:
                 prompts[current_section] = '\n'.join(current_content).strip()
             
             # 새 섹션 시작
-            current_section = line.strip()[1:-1]  # [ ] 제거
+            current_section = line.strip()[2:-2]  # << >> 제거
             current_content = []
         else:
             # 섹션 내용 추가
@@ -127,12 +130,12 @@ def get_video_files_from_s3_folder(s3_folder_path: str) -> List[str]:
     except Exception as e:
         raise RuntimeError(f"S3 폴더 조회 중 오류 발생: {str(e)}")
 
-def create_claude_prompt_with_context(utterances: List[Dict], scene_images: List[Dict], characters_info: str, previous_summaries: List[str] = None, current_video_index: int = 0) -> str:
+def create_claude_prompt_with_context(utterances: List[Dict], scene_images: List[Dict], characters_info: str, previous_summaries: List[str] = None, current_video_index: int = 0, prompt_language: str = "kor") -> str:
     """
     Rolling Context 기법으로 최근 3개 비디오 요약만 포함하여 Claude 프롬프트를 생성합니다.
     """
     # 프롬프트 템플릿 로드
-    prompts = load_prompts()
+    prompts = load_prompts(prompt_language)
     template = prompts.get("VIDEO_ANALYSIS_PROMPT", "")
     
     # 안전한 conversation 생성
@@ -177,7 +180,7 @@ def create_claude_prompt_with_context(utterances: List[Dict], scene_images: List
     
     return prompt
 
-async def get_bedrock_response_with_context(utterances: List[Dict], scene_images: List[Dict], characters_info: str, previous_summaries: List[str] = None, current_video_index: int = 0) -> str:
+async def get_bedrock_response_with_context(utterances: List[Dict], scene_images: List[Dict], characters_info: str, previous_summaries: List[str] = None, current_video_index: int = 0, prompt_language: str = "kor") -> str:
     """
     Rolling Context 기법으로 최근 3개 비디오 요약만 컨텍스트로 포함하여 Bedrock Claude 응답을 생성합니다.
     """
@@ -188,7 +191,7 @@ async def get_bedrock_response_with_context(utterances: List[Dict], scene_images
     model_id = os.getenv("CLAUDE_MODEL_ID")
 
     # 텍스트 프롬프트 생성 (Rolling Context 적용)
-    text_prompt = create_claude_prompt_with_context(utterances, scene_images, characters_info, previous_summaries, current_video_index)
+    text_prompt = create_claude_prompt_with_context(utterances, scene_images, characters_info, previous_summaries, current_video_index, prompt_language)
     
     # 디버깅: 프롬프트 출력
     print("=" * 80)
@@ -241,12 +244,13 @@ async def get_bedrock_response_with_context(utterances: List[Dict], scene_images
     
     return claude_response
 
-def parse_final_summary(final_summary_text: str) -> Dict[str, str]:
+def parse_final_summary(final_summary_text: str, expected_len: int) -> Dict[str, str]:
     """
     최종 요약에서 줄거리와 평론을 분리합니다.
     
     Args:
         final_summary_text: Claude에서 받은 최종 요약 텍스트
+        expected_len: 예상되는 분리된 부분의 개수 (예: 2)
         
     Returns:
         Dict: {"story": "줄거리", "review": "평론"}
@@ -255,31 +259,14 @@ def parse_final_summary(final_summary_text: str) -> Dict[str, str]:
         # ####### 구분자로 분리
         parts = final_summary_text.split("#######")
         
-        if len(parts) >= 2:
-            story = parts[0].strip()
-            review = parts[1].strip()
-            
-            print(f"📖 줄거리 추출 완료 (길이: {len(story)} 문자)")
-            print(f"📝 평론 추출 완료 (길이: {len(review)} 문자)")
-            
-            return {
-                "story": story,
-                "review": review
-            }
-        else:
-            # 구분자가 없는 경우 전체를 줄거리로 처리
-            print("⚠️ ####### 구분자를 찾을 수 없어 전체를 줄거리로 처리합니다.")
-            return {
-                "story": final_summary_text.strip(),
-                "review": "평론 정보가 없습니다."
-            }
+        # 오류 처리
+        if len(parts) != expected_len:
+            raise ValueError(f"예상된 부분 개수({expected_len})와 실제 개수({len(parts)})가 일치하지 않습니다.")
+        
+        return parts
             
     except Exception as e:
         print(f"❌ 최종 요약 파싱 중 오류: {str(e)}")
-        return {
-            "story": final_summary_text.strip(),
-            "review": "평론 파싱 중 오류가 발생했습니다."
-        }
 
 def collect_thumbnail_info(video_summaries: List[Dict], s3_video_uri: str = None) -> Dict[str, any]:
     """
@@ -405,7 +392,7 @@ async def get_final_scenes(custom_retrievals: List[str], movie_id: int) -> Dict[
     
     
 
-async def create_final_results(video_summaries: List[str], custom_prompts: List[str], characters_info: str) -> List[tuple]:
+async def create_final_results(video_summaries: List[str], custom_prompts: List[str], characters_info: str, prompt_language: str = "kor") -> List[tuple]:
     """
     모든 비디오 요약을 종합하여 최종 요약을 생성합니다.
     """
@@ -416,7 +403,7 @@ async def create_final_results(video_summaries: List[str], custom_prompts: List[
     model_id = os.getenv("CLAUDE_MODEL_ID")
 
     # 프롬프트 템플릿 로드
-    pre_prompts = load_prompts()
+    pre_prompts = load_prompts(prompt_language)
 
     # 각 입력 프롬프트 가져오기.
     template = pre_prompts.get("FINAL_SUMMARY_PROMPT", "")
@@ -427,52 +414,111 @@ async def create_final_results(video_summaries: List[str], custom_prompts: List[
         for i, summary in enumerate(video_summaries)
     ])
 
+    # 커스텀 프롬프트 목록 형태의 string으로 변환
+    custom_prompt_list = "\n".join(
+        f"{idx + 1}. {item}" for idx, item in enumerate(custom_prompts)
+        )
+
+    # 여러 프롬프트를 묶어서 한 번에 보내기
+    # 형식이 고정된 응답을 내도록 설계 필요
+    # 가져온 프롬프트 템플릿에 video_summaries, custom_prompts, characters_info 삽입
+    prompt = template.format(
+        all_summaries=all_summaries,
+        characters_info=characters_info,
+        custom_prompt_list=custom_prompt_list
+    )
+
     final_responses = []
 
     # get all prompts and answers
-    for index, current_prompt in enumerate(custom_prompts):
-        prompt = current_prompt + "\nthe sentence bleow describes the video.\n" + all_summaries\
-        + "\nthe sentence below shows the information of the character\n" + characters_info
+    # for index, current_prompt in enumerate(custom_prompts):
+    #     prompt = current_prompt + "\nthe sentence bleow describes the video.\n" + all_summaries\
+    #     + "\nthe sentence below shows the information of the character\n" + characters_info
 
-        # 디버깅: 최종 요약 프롬프트 출력
-        print("=" * 80)
-        print(f"🎬 FINAL SUMMARY PROMPT INPUT {index + 1}:")
-        print("=" * 80)
-        print(prompt)
-        print("=" * 80)
+    #     # 디버깅: 최종 요약 프롬프트 출력
+    #     print("=" * 80)
+    #     print(f"🎬 FINAL SUMMARY PROMPT INPUT {index + 1}:")
+    #     print("=" * 80)
+    #     print(prompt)
+    #     print("=" * 80)
 
-        request_body = {
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": 4096,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": prompt
-                        }
-                    ]
-                }
-            ]
-        }
+    #     request_body = {
+    #         "anthropic_version": "bedrock-2023-05-31",
+    #         "max_tokens": 4096,
+    #         "messages": [
+    #             {
+    #                 "role": "user",
+    #                 "content": [
+    #                     {
+    #                         "type": "text",
+    #                         "text": prompt
+    #                     }
+    #                 ]
+    #             }
+    #         ]
+    #     }
 
-        response = bedrock.invoke_model(
-        modelId=model_id,
-        body=json.dumps(request_body)
-        )
+    #     response = bedrock.invoke_model(
+    #     modelId=model_id,
+    #     body=json.dumps(request_body)
+    #     )
 
-        response_body = json.loads(response['body'].read())
-        final_response = response_body['content'][0]['text']
+    #     response_body = json.loads(response['body'].read())
+    #     final_response = response_body['content'][0]['text']
         
-        # 디버깅: 최종 요약 답변 출력
-        print(f"🎭 SUMMARY RESPONSE {index + 1}:")
-        print("=" * 80)
-        print(final_response)
-        print("=" * 80)
+    #     # 디버깅: 최종 요약 답변 출력
+    #     print(f"🎭 SUMMARY RESPONSE {index + 1}:")
+    #     print("=" * 80)
+    #     print(final_response)
+    #     print("=" * 80)
 
-        result_tuple = (current_prompt, final_response)
+    #     result_tuple = (current_prompt, final_response)
         
+    #     final_responses.append(result_tuple)
+
+    # 디버깅: 최종 요약 프롬프트 출력
+    print("=" * 80)
+    print(f"🎬 FINAL SUMMARY PROMPT INPUT:")
+    print("=" * 80)
+    print(prompt)
+    print("=" * 80)
+
+    # 프롬프트 보내기
+    request_body = {
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 4096,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": prompt
+                    }
+                ]
+            }
+        ]
+    }
+
+    response = bedrock.invoke_model(
+    modelId=model_id,
+    body=json.dumps(request_body)
+    )
+
+    response_body = json.loads(response['body'].read())
+    final_response = response_body['content'][0]['text']
+    
+    # 디버깅: 최종 요약 답변 출력
+    print(f"🎭 FINAL SUMMARY RESPONSE:")
+    print("=" * 80)
+    print(final_response)
+    print("=" * 80)
+
+    parsed_response_list = parse_final_summary(final_response, len(custom_prompts))
+
+    # 응답 파싱해서 List[tuple] 형태로 반환
+    for current_prompt, parsed_response in zip(custom_prompts, parsed_response_list):
+        result_tuple = (current_prompt, parsed_response)
         final_responses.append(result_tuple)
 
     return final_responses
@@ -480,7 +526,7 @@ async def create_final_results(video_summaries: List[str], custom_prompts: List[
 
 async def process_single_video(s3_video_uri: str, characters_info: str, movie_id: int, 
                               segment_duration: int = 600, init: bool = False, 
-                              language_code: str = "ko-KR", threshold: float = 30.0) -> Dict:
+                              language_code: str = "ko-KR", threshold: float = 30.0, prompt_language: str = "kor") -> Dict:
     """
     원본 비디오 파일을 받아서 동적으로 청크를 추출하며 순차적으로 처리하여 각각의 요약과 최종 요약을 생성합니다.
     
@@ -649,7 +695,7 @@ async def process_single_video(s3_video_uri: str, characters_info: str, movie_id
                 
                 print(f"🤖 Claude 요약 생성 시작...")
                 # Rolling Context를 적용하여 현재 청크 요약 생성
-                summary = await get_bedrock_response_with_context(utterances, scene_images, characters_info, previous_summaries, i)
+                summary = await get_bedrock_response_with_context(utterances, scene_images, characters_info, previous_summaries, i, prompt_language)
                 print(f"✅ Claude 요약 생성 완료 (길이: {len(summary)} 문자)")
                 
                 # 요약을 데이터베이스에 저장 (청크 순서에 맞는 summary_id 사용)
@@ -705,7 +751,7 @@ async def process_single_video(s3_video_uri: str, characters_info: str, movie_id
         
         print("🎭 최종 프롬프트 응답 결과 생성 중...")
         # 최종 프롬프트 응답 결과 생성
-        final_summary = await create_final_results([vs["summary"] for vs in video_summaries], custom_prompts, characters_info)
+        final_summary = await create_final_results([vs["summary"] for vs in video_summaries], custom_prompts, characters_info, prompt_language)
         print(f"✅ 최종 요약 생성 완료")
 
         # 최종 장면 검색 결과 생성 (아래 함수는 위와 다르게 직접 db 조회를 통해 정보에 접근한다.)

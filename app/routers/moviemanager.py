@@ -37,7 +37,8 @@ async def moviemanager_endpoint(req: MovieManagerRequest):
                 segment_duration=req.segment_duration,
                 init=req.init,
                 language_code=req.language_code,
-                threshold=req.threshold
+                threshold=req.threshold,
+                prompt_language=req.prompt_language,
             )
             
         else:
