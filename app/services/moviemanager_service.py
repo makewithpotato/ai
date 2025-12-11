@@ -130,7 +130,7 @@ def get_video_files_from_s3_folder(s3_folder_path: str) -> List[str]:
     except Exception as e:
         raise RuntimeError(f"S3 폴더 조회 중 오류 발생: {str(e)}")
 
-def create_claude_prompt_with_context(utterances: List[Dict], scene_images: List[Dict], characters_info: str, previous_summaries: List[str] = None, current_video_index: int = 0, prompt_language: str = "kor") -> str:
+def create_claude_prompt_with_context(utterances: List[Dict], scene_images: List[Dict], characters_info: str, previous_summaries: List[str] = None, current_video_index: int = 0, prompt_language: str = "kor", custom_utterance = None, with_cw=True) -> str:
     """
     Rolling Context 기법으로 최근 3개 비디오 요약만 포함하여 Claude 프롬프트를 생성합니다.
     """
@@ -138,14 +138,18 @@ def create_claude_prompt_with_context(utterances: List[Dict], scene_images: List
     prompts = load_prompts(prompt_language)
     template = prompts.get("VIDEO_ANALYSIS_PROMPT", "")
     
-    # 안전한 conversation 생성
-    if utterances:
-        conversation = "\n".join([
-            f"[{utterance.get('speaker', 'Unknown')}] {utterance.get('text', '')}"
-            for utterance in utterances if utterance and utterance.get('text')
-        ])
-    else:
-        conversation = "(이 영상에는 대화 내용이 없습니다)"
+    if custom_utterance:
+        conversation = custom_utterance
+
+    else: 
+        # 안전한 conversation 생성
+        if utterances:
+            conversation = "\n".join([
+                f"[{utterance.get('speaker', 'Unknown')}] {utterance.get('text', '')}"
+                for utterance in utterances if utterance and utterance.get('text')
+            ])
+        else:
+            conversation = "(이 영상에는 대화 내용이 없습니다)"
     
     # 안전한 scene_times 생성
     if scene_images:
@@ -158,7 +162,7 @@ def create_claude_prompt_with_context(utterances: List[Dict], scene_images: List
     
     # Rolling Context: 최근 3개 비디오 요약만 사용
     context = ""
-    if previous_summaries:
+    if previous_summaries and with_cw:
         # 최근 3개만 선택 (현재 비디오 직전 3개)
         recent_summaries = previous_summaries[-3:]
         start_index = max(0, current_video_index - len(recent_summaries))
@@ -180,7 +184,7 @@ def create_claude_prompt_with_context(utterances: List[Dict], scene_images: List
     
     return prompt
 
-async def get_bedrock_response_with_context(utterances: List[Dict], scene_images: List[Dict], characters_info: str, previous_summaries: List[str] = None, current_video_index: int = 0, prompt_language: str = "kor") -> str:
+async def get_bedrock_response_with_context(utterances: List[Dict], scene_images: List[Dict], characters_info: str, previous_summaries: List[str] = None, current_video_index: int = 0, prompt_language: str = "kor", custom_utterance = None, with_cw=True) -> str:
     """
     Rolling Context 기법으로 최근 3개 비디오 요약만 컨텍스트로 포함하여 Bedrock Claude 응답을 생성합니다.
     """
@@ -191,7 +195,7 @@ async def get_bedrock_response_with_context(utterances: List[Dict], scene_images
     model_id = os.getenv("CLAUDE_MODEL_ID")
 
     # 텍스트 프롬프트 생성 (Rolling Context 적용)
-    text_prompt = create_claude_prompt_with_context(utterances, scene_images, characters_info, previous_summaries, current_video_index, prompt_language)
+    text_prompt = create_claude_prompt_with_context(utterances, scene_images, characters_info, previous_summaries, current_video_index, prompt_language=prompt_language, custom_utterance=custom_utterance, with_cw=with_cw)
     
     # 디버깅: 프롬프트 출력
     print("=" * 80)
@@ -340,7 +344,7 @@ async def get_final_scenes(custom_retrievals: List[str], movie_id: int) -> Dict[
     embedding_uri = get_embedding_uri(db, movie_id)  # movie에 저장된 임베딩 존재하는지 확인
     db.close()
     if not embedding_uri:
-        raise ValueError("해당 영화에 대한 임베딩이 존재하지 않습니다. 먼저 영화를 처리해야 합니다.")
+        return {}  # 임베딩이 없으면 빈 결과 반환
     
     print(f"📊 임베딩 URI: {embedding_uri}")
 
@@ -665,10 +669,13 @@ async def process_single_video(s3_video_uri: str, characters_info: str, movie_id
 
                 utterances, (scenes, saved_uri) = await asyncio.gather(transcribe_task, scene_task)
 
-                db = SessionLocal()
-                set_embedding_uri(db, movie_id, saved_uri)  # 임베딩 URI 저장
-                db.close()
-                print(f"✅ 장면 임베딩 URI 저장 완료: {saved_uri}")
+                if saved_uri:
+                    db = SessionLocal()
+                    set_embedding_uri(db, movie_id, saved_uri)  # 임베딩 URI 저장
+                    db.close()
+                    print(f"✅ 장면 임베딩 URI 저장 완료: {saved_uri}")
+                else:
+                    print(f"⚠️ 장면 임베딩 URI가 반환되지 않았습니다.")
                 
                 print(f"✅ STT 결과: {len(utterances) if utterances else 0}개의 발화")
                 print(f"✅ 장면 감지: {len(scenes) if scenes else 0}개의 장면")
@@ -757,8 +764,13 @@ async def process_single_video(s3_video_uri: str, characters_info: str, movie_id
         # 최종 장면 검색 결과 생성 (아래 함수는 위와 다르게 직접 db 조회를 통해 정보에 접근한다.)
         final_scenes = await get_final_scenes(custom_retrievals, movie_id)
         # s3 uri들의 리스트의 딕셔너리 형태가 되어야 할 것.
-        print(f"✅ 최종 장면 검색 결과 생성 완료")
-        print(f"{final_scenes}")
+        
+        # 빈 딕셔너리가 아닌 경우에만 출력
+        if final_scenes:
+            print(f"✅ 최종 장면 검색 결과 생성 완료")
+            print(f"{final_scenes}")
+        else:
+            print(f"⚠️ 최종 장면 검색 결과가 없습니다.")
 
         # 최종 요약도 데이터베이스에 저장 (모든 청크 다음 순서)
         print(f"💾 최종 요약 데이터베이스 저장 시작...")

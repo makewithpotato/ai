@@ -1,7 +1,7 @@
 import os
 import tempfile
 import boto3
-from typing import List, Dict
+from typing import List, Dict, Optional
 import cv2
 from scenedetect import detect, ContentDetector
 from app.services.marengo_service import embed_marengo
@@ -107,7 +107,7 @@ def save_frame_to_s3(frame: np.ndarray, prefix: str = "scenes") -> str:
         # 임시 파일 삭제
         os.unlink(temp_file.name)
 
-def detect_and_embed_scenes(video_path: str, threshold: float = 30.0, max_scenes_count: int = 20, movie_id: int = None, original_uri: str = None) -> tuple[List[Dict], str]:
+def detect_and_embed_scenes(video_path: str, threshold: float = 30.0, max_scenes_count: int = 20, movie_id: int = None, original_uri: str = None) -> tuple[List[Dict], Optional[str]]:
     """
     비디오에서 주요 장면을 감지하고 각 장면의 대표 프레임을 base64로 반환합니다.
     품질이 좋은 프레임은 S3 thumbnails/ 경로에도 저장합니다.
@@ -157,6 +157,7 @@ def detect_and_embed_scenes(video_path: str, threshold: float = 30.0, max_scenes
         scenes = selected_scenes
 
     embed_uri_pairs = {}
+    saved_uri: Optional[str] = None
 
     # 품질 검사 및 S3 저장 (최대 20개 장면에 대해서만 수행)
     if movie_id is not None:
