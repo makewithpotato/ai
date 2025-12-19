@@ -151,32 +151,33 @@ def transcribe_video(uri: str, language_code: str = "en-US") -> List[Dict]:
                 segments = transcript_json['results']['speaker_labels']['segments']
                 items = transcript_json['results']['items']
                 
-                # 각 세그먼트에 대해 발화 정보 생성
-                for segment in segments:
-                    start_time = safe_float_convert(segment.get('start_time', '0'))
-                    end_time = safe_float_convert(segment.get('end_time', '0'))
-                    
-                    # 해당 세그먼트의 시간 범위에 있는 items 찾기
-                    segment_items = [
-                        item for item in items 
-                        if safe_float_convert(item.get('start_time', '0')) >= start_time 
-                        and safe_float_convert(item.get('end_time', '0')) <= end_time
-                    ]
-                    
-                    # items에서 텍스트 추출
-                    segment_text = ' '.join([
-                        item['alternatives'][0]['content']
-                        for item in segment_items
-                        if 'alternatives' in item and item['alternatives']
-                    ])
-                    
-                    utterance = Utterance(
-                        speaker=segment.get('speaker_label', 'unknown'),
-                        start_time=start_time,
-                        end_time=end_time,
-                        text=segment_text
-                    )
-                    utterances.append(utterance.to_dict())
+                if segments:
+                    # 각 세그먼트에 대해 발화 정보 생성
+                    for segment in segments:
+                        start_time = safe_float_convert(segment.get('start_time', '0'))
+                        end_time = safe_float_convert(segment.get('end_time', '0'))
+                        
+                        # 해당 세그먼트의 시간 범위에 있는 items 찾기
+                        segment_items = [
+                            item for item in items 
+                            if safe_float_convert(item.get('start_time', '0')) >= start_time 
+                            and safe_float_convert(item.get('end_time', '0')) <= end_time
+                        ]
+                        
+                        # items에서 텍스트 추출
+                        segment_text = ' '.join([
+                            item['alternatives'][0]['content']
+                            for item in segment_items
+                            if 'alternatives' in item and item['alternatives']
+                        ])
+                        
+                        utterance = Utterance(
+                            speaker=segment.get('speaker_label', 'unknown'),
+                            start_time=start_time,
+                            end_time=end_time,
+                            text=segment_text
+                        )
+                        utterances.append(utterance.to_dict())
 
             return utterances
         else:

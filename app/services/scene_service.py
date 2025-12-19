@@ -1,7 +1,7 @@
 import os
 import tempfile
 import boto3
-from typing import List, Dict
+from typing import List, Dict, Optional
 import cv2
 from scenedetect import detect, ContentDetector
 from app.services.marengo_service import embed_marengo
@@ -9,6 +9,39 @@ import numpy as np
 import base64
 import uuid
 import json
+
+def match_utterances_to_scene(scene_start: float, scene_end: float, utterances: List[Dict]) -> str:
+    """
+    장면의 시간 범위에 해당하는 STT 텍스트를 추출하여 결합합니다.
+    
+    Args:
+        scene_start: 장면 시작 시간 (초)
+        scene_end: 장면 종료 시간 (초)
+        utterances: STT 발화 정보 리스트 [{"speaker": str, "start_time": float, "end_time": float, "text": str}, ...]
+    
+    Returns:
+        str: 해당 장면에 포함된 모든 대사를 결합한 텍스트
+    """
+    if not utterances:
+        return ""
+    
+    matched_texts = []
+    
+    for utterance in utterances:
+        utt_start = utterance.get('start_time', 0)
+        utt_end = utterance.get('end_time', 0)
+        text = utterance.get('text', '')
+        
+        # 발화가 장면 시간 범위와 겹치는지 확인
+        # 겹침 조건: 발화 시작이 장면 끝 이전이고, 발화 끝이 장면 시작 이후
+        if utt_start < scene_end and utt_end > scene_start:
+            if text:
+                matched_texts.append(text)
+    
+    # 모든 매칭된 텍스트를 공백으로 연결
+    combined_text = " ".join(matched_texts).strip()
+    
+    return combined_text
 
 def get_output_bucket() -> str:
     """
@@ -107,7 +140,7 @@ def save_frame_to_s3(frame: np.ndarray, prefix: str = "scenes") -> str:
         # 임시 파일 삭제
         os.unlink(temp_file.name)
 
-def detect_and_embed_scenes(video_path: str, threshold: float = 30.0, max_scenes_count: int = 20, movie_id: int = None, original_uri: str = None) -> tuple[List[Dict], str]:
+def detect_and_embed_scenes(video_path: str, threshold: float = 30.0, max_scenes_count: int = 20, movie_id: int = None, original_uri: str = None) -> tuple[List[Dict], Optional[str]]:
     """
     비디오에서 주요 장면을 감지하고 각 장면의 대표 프레임을 base64로 반환합니다.
     품질이 좋은 프레임은 S3 thumbnails/ 경로에도 저장합니다.
@@ -157,6 +190,7 @@ def detect_and_embed_scenes(video_path: str, threshold: float = 30.0, max_scenes
         scenes = selected_scenes
 
     embed_uri_pairs = {}
+    saved_uri: Optional[str] = None
 
     # 품질 검사 및 S3 저장 (최대 20개 장면에 대해서만 수행)
     if movie_id is not None:
