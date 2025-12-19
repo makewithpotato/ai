@@ -130,9 +130,10 @@ def get_video_files_from_s3_folder(s3_folder_path: str) -> List[str]:
     except Exception as e:
         raise RuntimeError(f"S3 폴더 조회 중 오류 발생: {str(e)}")
 
-def create_claude_prompt_with_context(utterances: List[Dict], scene_images: List[Dict], characters_info: str, previous_summaries: List[str] = None, current_video_index: int = 0, prompt_language: str = "kor", custom_utterance = None, with_cw=True) -> str:
+def create_claude_prompt_with_context(utterances: List[Dict], scene_images: List[Dict], characters_info: str, previous_summaries: List[str] = None, current_video_index: int = 0, prompt_language: str = "kor", custom_utterance = None, with_cw=True, retrieval_queries: List[str] = None) -> str:
     """
     Rolling Context 기법으로 최근 3개 비디오 요약만 포함하여 Claude 프롬프트를 생성합니다.
+    장면과 대사를 시간대별로 연결하여 제공합니다.
     """
     # 프롬프트 템플릿 로드
     prompts = load_prompts(prompt_language)
@@ -151,14 +152,43 @@ def create_claude_prompt_with_context(utterances: List[Dict], scene_images: List
         else:
             conversation = "(이 영상에는 대화 내용이 없습니다)"
     
-    # 안전한 scene_times 생성
-    if scene_images:
-        scene_times = "\n".join([
-            f"Scene {i+1}: start_time={scene.get('start_time', 0)}"
+    # 안전한 scene_times 생성 -> 장면과 대사를 시간대별로 연결
+    scene_dialogue_mapping = ""
+    if scene_images and utterances:
+        scene_info_list = []
+        for i, scene in enumerate(scene_images):
+            if scene:
+                scene_start = scene.get('start_time', 0)
+                scene_end = scene_start + 5  # 장면 길이를 5초로 가정 (또는 scene에 end_time이 있다면 사용)
+                
+                # 해당 장면 시간대의 대사 찾기
+                scene_utterances = [
+                    utt for utt in utterances
+                    if utt.get('start_time', 0) < scene_end and utt.get('end_time', 0) > scene_start
+                ]
+                
+                dialogue_texts = []
+                for utt in scene_utterances:
+                    speaker = utt.get('speaker', 'Unknown')
+                    text = utt.get('text', '')
+                    if text:
+                        dialogue_texts.append(f"[{speaker}] {text}")
+                
+                dialogue = " / ".join(dialogue_texts) if dialogue_texts else "(대사 없음)"
+                
+                scene_info_list.append(
+                    f"Scene {i}: 시간={scene_start:.1f}s, 대사: {dialogue}"
+                )
+        
+        scene_dialogue_mapping = "\n".join(scene_info_list)
+    elif scene_images:
+        # utterances가 없는 경우 기존 방식
+        scene_dialogue_mapping = "\n".join([
+            f"Scene {i}: 시간={scene.get('start_time', 0):.1f}s"
             for i, scene in enumerate(scene_images) if scene
         ])
     else:
-        scene_times = "(이 영상에는 장면 정보가 없습니다)"
+        scene_dialogue_mapping = "(이 영상에는 장면 정보가 없습니다)"
     
     # Rolling Context: 최근 3개 비디오 요약만 사용
     context = ""
@@ -179,14 +209,33 @@ def create_claude_prompt_with_context(utterances: List[Dict], scene_images: List
         characters_info=characters_info,
         context=context,
         conversation=conversation,
-        scene_times=scene_times
+        scene_times=scene_dialogue_mapping
     )
+    
+    # retrieval_queries가 있는 경우 추가 프롬프트
+    if retrieval_queries:
+        retrieval_section = "\n\n=== 장면 검색 요청 ===\n"
+        retrieval_section += "사용자가 다음 검색어로 장면을 찾고 싶어합니다:\n"
+        for idx, query in enumerate(retrieval_queries, 1):
+            retrieval_section += f"{idx}. {query}\n"
+        retrieval_section += "\n위 장면 목록에서 각 검색어와 가장 관련된 장면 번호들을 선택해주세요.\n"
+        retrieval_section += "응답 마지막에 다음 형식으로 추가해주세요:\n"
+        retrieval_section += "[SCENE_SELECTION]\n"
+        for idx, query in enumerate(retrieval_queries, 1):
+            retrieval_section += f"{idx}. {query}: Scene 번호 (쉼표로 구분, 예: 0, 3, 7)\n"
+        retrieval_section += "[/SCENE_SELECTION]"
+        
+        prompt += retrieval_section
     
     return prompt
 
-async def get_bedrock_response_with_context(utterances: List[Dict], scene_images: List[Dict], characters_info: str, previous_summaries: List[str] = None, current_video_index: int = 0, prompt_language: str = "kor", custom_utterance = None, with_cw=True) -> str:
+async def get_bedrock_response_with_context(utterances: List[Dict], scene_images: List[Dict], characters_info: str, previous_summaries: List[str] = None, current_video_index: int = 0, prompt_language: str = "kor", custom_utterance = None, with_cw=True, retrieval_queries: List[str] = None) -> tuple[str, Dict[str, List[int]]]:
     """
     Rolling Context 기법으로 최근 3개 비디오 요약만 컨텍스트로 포함하여 Bedrock Claude 응답을 생성합니다.
+    retrieval_queries가 있으면 장면 선택 결과도 함께 반환합니다.
+    
+    Returns:
+        tuple[str, Dict[str, List[int]]]: (요약 텍스트, 검색어별 선택된 장면 인덱스)
     """
     bedrock = boto3.client(
         service_name='bedrock-runtime',
@@ -195,7 +244,7 @@ async def get_bedrock_response_with_context(utterances: List[Dict], scene_images
     model_id = os.getenv("CLAUDE_MODEL_ID")
 
     # 텍스트 프롬프트 생성 (Rolling Context 적용)
-    text_prompt = create_claude_prompt_with_context(utterances, scene_images, characters_info, previous_summaries, current_video_index, prompt_language=prompt_language, custom_utterance=custom_utterance, with_cw=with_cw)
+    text_prompt = create_claude_prompt_with_context(utterances, scene_images, characters_info, previous_summaries, current_video_index, prompt_language=prompt_language, custom_utterance=custom_utterance, with_cw=with_cw, retrieval_queries=retrieval_queries)
     
     # 디버깅: 프롬프트 출력
     print("=" * 80)
@@ -246,7 +295,37 @@ async def get_bedrock_response_with_context(utterances: List[Dict], scene_images
     print(claude_response)
     print("=" * 80)
     
-    return claude_response
+    # 장면 선택 결과 파싱
+    scene_selections = {}
+    if retrieval_queries:
+        # [SCENE_SELECTION] ... [/SCENE_SELECTION] 섹션 찾기
+        import re
+        selection_match = re.search(r'\[SCENE_SELECTION\](.*?)\[/SCENE_SELECTION\]', claude_response, re.DOTALL)
+        if selection_match:
+            selection_text = selection_match.group(1)
+            print("\n📌 장면 선택 결과 파싱:")
+            
+            for idx, query in enumerate(retrieval_queries, 1):
+                # 각 검색어에 대한 장면 번호 찾기
+                pattern = f"{idx}\.\s*{re.escape(query)}[:\s]+(.+)"
+                match = re.search(pattern, selection_text)
+                if match:
+                    scene_numbers_str = match.group(1)
+                    # 숫자만 추출
+                    scene_numbers = [int(n) for n in re.findall(r'\d+', scene_numbers_str)]
+                    scene_selections[query] = scene_numbers
+                    print(f"  {query}: Scene {scene_numbers}")
+                else:
+                    scene_selections[query] = []
+                    print(f"  {query}: 선택된 장면 없음")
+            
+            # 응답에서 [SCENE_SELECTION] 섹션 제거
+            claude_response = re.sub(r'\[SCENE_SELECTION\].*?\[/SCENE_SELECTION\]', '', claude_response, flags=re.DOTALL).strip()
+    else:
+        # retrieval_queries가 없는 경우 빈 딕셔너리 반환
+        scene_selections = {}
+    
+    return claude_response, scene_selections
 
 def parse_final_summary(final_summary_text: str, expected_len: int) -> Dict[str, str]:
     """
@@ -325,24 +404,32 @@ def collect_thumbnail_info(video_summaries: List[Dict], s3_video_uri: str = None
             "urls": []
         }
 
-async def get_final_scenes(custom_retrievals: List[str], movie_id: int) -> Dict[str, List[str]]:
+async def get_final_scenes(custom_retrievals: List[str], movie_id: int, video_summaries: List[Dict] = None) -> Dict[str, List[str]]:
     """
     커스텀 검색어들을 사용하여 최종 장면 검색 결과를 생성합니다.
+    
+    새로운 방식:
+    1. video_summaries에 저장된 LLM의 장면 선택 결과를 수집
+    2. 선택된 장면들의 임베딩 벡터를 가져와서 코사인 유사도 계산
+    3. 유사도가 높은 top-3 반환
 
-    1. 데이터베이스에서 movie에 임베딩 존재하는지 확인하기.
-    2. 임베딩 존재하면 s3 접근하여 임베딩 벡터 리스트 가져오기.
-    3. 가져온 벡터들 중 일정 이상 유사한 벡터 여러 개 선택.
-    4. 선택한 벡터들에 해당하는 S3 이미지(장면) URI 반환.
-
-    입력:
+    Args:
         custom_retrievals: 커스텀 검색어 리스트
-    출력:
-        List[Dict]: 해당 검색어들에 대응되는 장면 이미지 URI 리스트
+        movie_id: 영화 ID
+        video_summaries: 비디오 요약 정보 (scene_selections 포함)
+    
+    Returns:
+        Dict[str, List[str]]: 검색어별 장면 URI 리스트
     """
+    
+    if not video_summaries:
+        print("⚠️ video_summaries가 제공되지 않았습니다.")
+        return {}
 
     db = SessionLocal()
-    embedding_uri = get_embedding_uri(db, movie_id)  # movie에 저장된 임베딩 존재하는지 확인
+    embedding_uri = get_embedding_uri(db, movie_id)
     db.close()
+    
     if not embedding_uri:
         return {}  # 임베딩이 없으면 빈 결과 반환
     
@@ -352,45 +439,61 @@ async def get_final_scenes(custom_retrievals: List[str], movie_id: int) -> Dict[
     uri2embedding_dict = download_json_from_s3(embedding_uri)
     print(f"✅ S3에서 임베딩 벡터 데이터 다운로드 완료 (총 {len(uri2embedding_dict)}개 항목)")
 
-    # 순서를 유지하며 uri와 embedding을 각각의 리스트로 분리 (Python 3.7+ dict는 유지 보장)
-    uri = list(uri2embedding_dict.keys())
-    scene_feat = list(uri2embedding_dict.values())
-
-    # 임베딩은 행렬로 변환
-    scene_feat_matrix = np.array(scene_feat)
-    print(f"📊 임베딩 매트릭스 형태: {scene_feat_matrix.shape} (샘플 개수 x 임베딩 차원)")
-
-    retrieval_feat_matrix = np.empty((0, scene_feat_matrix.shape[1]))  # 빈 행렬 초기화
-
-    # 각 입력 retrieval에 대해,
-    for retrieval in custom_retrievals:
-        # Bedrock Claude Embedding API 호출하여 임베딩 벡터 획득
-        text_vector = embed_marengo("text", retrieval)
-        print(f"✅ 검색어 임베딩 벡터 획득 완료: '{retrieval}'")
-        retrieval_feat_matrix = np.vstack([retrieval_feat_matrix, np.array(text_vector)])
-
-    # marengo 자체는 거의 유사한 크기의 정규화된 벡터를 반환하지만,
-    # 이후 파이프라인 안전성을 위하여 명시적으로 정규화를 수행한다.
-    print("📊 임베딩 벡터 정규화 중...")
-    print(scene_feat_matrix.shape, retrieval_feat_matrix.shape)
+    uri_list = list(uri2embedding_dict.keys())
+    scene_feat_list = list(uri2embedding_dict.values())
+    scene_feat_matrix = np.array(scene_feat_list)
+    
+    # 정규화
     scene_feat_matrix = scene_feat_matrix / np.linalg.norm(scene_feat_matrix, axis=1, keepdims=True)
-    retrieval_feat_matrix = retrieval_feat_matrix / np.linalg.norm(retrieval_feat_matrix, axis=1, keepdims=True)
-
-    # 하나만 뽑아서 크기 출력
-    print(f"📊 정규화된 임베딩 벡터의 l2 norm: {np.linalg.norm(scene_feat_matrix[0])}, {np.linalg.norm(retrieval_feat_matrix[0])}")
-
-    # 코사인 유사도 계산
-    similarity_matrix = np.dot(retrieval_feat_matrix, scene_feat_matrix.T)
-    print(f"📊 유사도 매트릭스 형태: {similarity_matrix.shape}")
-    print(similarity_matrix)
-
-    # top-k 유사한 장면 선택
-    top_k = 3
+    
     result = {}
-    for i, retrieval in enumerate(custom_retrievals):
-        idx_k = np.argsort(-similarity_matrix[i])[:top_k]
-        result[retrieval] = [uri[idx] for idx in idx_k]
-
+    
+    # 각 청크에서 LLM이 선택한 장면 인덱스 수집
+    for retrieval in custom_retrievals:
+        print(f"\n🔍 검색어 처리 중: '{retrieval}'")
+        
+        selected_scene_indices = []
+        
+        # 모든 청크를 순회하며 해당 검색어에 대해 선택된 장면 수집
+        for vs in video_summaries:
+            scene_selections = vs.get("scene_selections", {})
+            if retrieval in scene_selections:
+                chunk_selected = scene_selections[retrieval]
+                selected_scene_indices.extend(chunk_selected)
+        
+        if not selected_scene_indices:
+            print(f"⚠️ LLM이 '{retrieval}'에 관련된 장면을 찾지 못했습니다.")
+            result[retrieval] = []
+            continue
+        
+        # 선택된 장면들이 전체 장면 수를 초과하지 않도록 필터링
+        valid_indices = [idx for idx in selected_scene_indices if idx < len(uri_list)]
+        
+        if not valid_indices:
+            print(f"⚠️ 유효한 장면 인덱스가 없습니다.")
+            result[retrieval] = []
+            continue
+        
+        print(f"📋 LLM이 선택한 장면: {len(valid_indices)}개")
+        
+        # 선택된 장면들 중 벡터 유사도 높은 top-3 선택
+        selected_uris = [uri_list[idx] for idx in valid_indices]
+        selected_feats = scene_feat_matrix[valid_indices]
+        
+        # 검색어 임베딩
+        text_vector = embed_marengo("text", retrieval)
+        text_vector = np.array(text_vector) / np.linalg.norm(text_vector)
+        
+        # 코사인 유사도 계산
+        similarities = np.dot(selected_feats, text_vector)
+        
+        # top-3 선택
+        top_k = min(3, len(valid_indices))
+        top_k_indices = np.argsort(-similarities)[:top_k]
+        
+        result[retrieval] = [selected_uris[idx] for idx in top_k_indices]
+        print(f"✅ 최종 선택된 장면: {len(result[retrieval])}개")
+    
     return result
 
     
@@ -641,6 +744,13 @@ async def process_single_video(s3_video_uri: str, characters_info: str, movie_id
         print(f"🎥 총 {total_chunks}개의 청크 중 {start_from + 1}번부터 처리합니다.")
         print(f"🎬 Movie ID: {movie_id}")
         print("=" * 80)
+
+        # 커스텀 프롬프트 가져오기
+        db = SessionLocal()
+        custom_prompts = get_custom_prompts(db, movie_id)
+        custom_retrievals = get_custom_retrievals(db, movie_id)
+        db.close()
+        print(f"프롬프트 {len(custom_prompts)}개, 검색어 {len(custom_retrievals)}개 로드 완료")
         
         # start_from 인덱스부터 청크 처리 시작
         for i in range(start_from, total_chunks):
@@ -702,7 +812,11 @@ async def process_single_video(s3_video_uri: str, characters_info: str, movie_id
                 
                 print(f"🤖 Claude 요약 생성 시작...")
                 # Rolling Context를 적용하여 현재 청크 요약 생성
-                summary = await get_bedrock_response_with_context(utterances, scene_images, characters_info, previous_summaries, i, prompt_language)
+                # 검색어도 함께 전달하여 LLM이 관련 장면 선택
+                summary, scene_selections = await get_bedrock_response_with_context(
+                    utterances, scene_images, characters_info, previous_summaries, i, 
+                    prompt_language, retrieval_queries=custom_retrievals
+                )
                 print(f"✅ Claude 요약 생성 완료 (길이: {len(summary)} 문자)")
                 
                 # 요약을 데이터베이스에 저장 (청크 순서에 맞는 summary_id 사용)
@@ -720,7 +834,10 @@ async def process_single_video(s3_video_uri: str, characters_info: str, movie_id
                     "video_uri": f"chunk_{current_chunk}_{chunk_info['start']:.0f}s-{chunk_info['end']:.0f}s",
                     "summary": summary,
                     "order": i + 1,
-                    "summary_id": summary_id
+                    "summary_id": summary_id,
+                    "scenes": scenes,  # 장면 정보 저장
+                    "utterances": utterances,  # STT 정보 저장
+                    "scene_selections": scene_selections  # LLM이 선택한 장면 저장
                 })
                 
                 # 다음 청크 처리를 위해 이전 요약에 추가
@@ -741,12 +858,7 @@ async def process_single_video(s3_video_uri: str, characters_info: str, movie_id
         db.close()
         print(f"📊 Movie 상태 업데이트: ORGANIZING")
 
-        # 커스텀 프롬프트 가져오기
-        db = SessionLocal()
-        custom_prompts = get_custom_prompts(db, movie_id)
-        custom_retrievals = get_custom_retrievals(db, movie_id)
-        db.close()
-        print(f"프롬프트 {len(custom_prompts)}개, 검색어 {len(custom_retrievals)}개 로드 완료")
+
 
         # 프롬프트가 너무 많다면 10개로 제한
         if len(custom_prompts) > 10:
@@ -761,8 +873,8 @@ async def process_single_video(s3_video_uri: str, characters_info: str, movie_id
         final_summary = await create_final_results([vs["summary"] for vs in video_summaries], custom_prompts, characters_info, prompt_language)
         print(f"✅ 최종 요약 생성 완료")
 
-        # 최종 장면 검색 결과 생성 (아래 함수는 위와 다르게 직접 db 조회를 통해 정보에 접근한다.)
-        final_scenes = await get_final_scenes(custom_retrievals, movie_id)
+        # 최종 장면 검색 결과 생성 (LLM 선택 + 벡터 유사도)
+        final_scenes = await get_final_scenes(custom_retrievals, movie_id, video_summaries)
         # s3 uri들의 리스트의 딕셔너리 형태가 되어야 할 것.
         
         # 빈 딕셔너리가 아닌 경우에만 출력
@@ -1025,7 +1137,7 @@ async def process_videos_from_folder(s3_folder_path: str, characters_info: str, 
             
             print(f"🤖 Claude 요약 생성 시작...")
             # Rolling Context를 적용하여 현재 비디오 요약 생성
-            summary = await get_bedrock_response_with_context(utterances, scene_images, characters_info, previous_summaries, i)
+            summary, _ = await get_bedrock_response_with_context(utterances, scene_images, characters_info, previous_summaries, i)
             print(f"✅ Claude 요약 생성 완료 (길이: {len(summary)} 문자)")
             
             # 요약을 데이터베이스에 저장 (비디오 순서에 맞는 summary_id 사용)

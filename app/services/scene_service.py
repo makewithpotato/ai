@@ -10,6 +10,39 @@ import base64
 import uuid
 import json
 
+def match_utterances_to_scene(scene_start: float, scene_end: float, utterances: List[Dict]) -> str:
+    """
+    장면의 시간 범위에 해당하는 STT 텍스트를 추출하여 결합합니다.
+    
+    Args:
+        scene_start: 장면 시작 시간 (초)
+        scene_end: 장면 종료 시간 (초)
+        utterances: STT 발화 정보 리스트 [{"speaker": str, "start_time": float, "end_time": float, "text": str}, ...]
+    
+    Returns:
+        str: 해당 장면에 포함된 모든 대사를 결합한 텍스트
+    """
+    if not utterances:
+        return ""
+    
+    matched_texts = []
+    
+    for utterance in utterances:
+        utt_start = utterance.get('start_time', 0)
+        utt_end = utterance.get('end_time', 0)
+        text = utterance.get('text', '')
+        
+        # 발화가 장면 시간 범위와 겹치는지 확인
+        # 겹침 조건: 발화 시작이 장면 끝 이전이고, 발화 끝이 장면 시작 이후
+        if utt_start < scene_end and utt_end > scene_start:
+            if text:
+                matched_texts.append(text)
+    
+    # 모든 매칭된 텍스트를 공백으로 연결
+    combined_text = " ".join(matched_texts).strip()
+    
+    return combined_text
+
 def get_output_bucket() -> str:
     """
     환경 변수에서 출력 버킷 이름을 가져옵니다.
