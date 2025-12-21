@@ -100,11 +100,24 @@ def download_json_from_s3(s3_uri: str) -> Dict:
     except Exception as e:
         raise e
 
-def frame_to_base64(frame: np.ndarray) -> str:
+def frame_to_base64(frame: np.ndarray, max_size_mb: float = 4.5) -> str:
     """
-    OpenCV 프레임을 base64 문자열로 변환합니다.
+    OpenCV 프레임을 base64 문자열로 변환 (간단한 버전)
     """
-    _, buffer = cv2.imencode('.jpg', frame)
+    max_size_bytes = max_size_mb * 1024 * 1024
+    
+    # 먼저 적절한 품질로 인코딩
+    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 90]
+    _, buffer = cv2.imencode('.jpg', frame, encode_param)
+    
+    # 크기가 크면 리사이징
+    if len(buffer) > max_size_bytes:
+        height, width = frame.shape[:2]
+        scale = (max_size_bytes / len(buffer)) ** 0.5
+        new_size = (int(width * scale * 0.9), int(height * scale * 0.9))
+        resized = cv2.resize(frame, new_size, interpolation=cv2.INTER_AREA)
+        _, buffer = cv2.imencode('.jpg', resized, encode_param)
+    
     return base64.b64encode(buffer).decode('utf-8')
 
 def save_frame_to_s3(frame: np.ndarray, prefix: str = "scenes") -> str:
@@ -140,7 +153,7 @@ def save_frame_to_s3(frame: np.ndarray, prefix: str = "scenes") -> str:
         # 임시 파일 삭제
         os.unlink(temp_file.name)
 
-def detect_and_embed_scenes(video_path: str, threshold: float = 30.0, max_scenes_count: int = 20, movie_id: int = None, original_uri: str = None) -> tuple[List[Dict], Optional[str]]:
+def detect_and_embed_scenes(video_path: str, threshold: float = 30.0, max_scenes_count: int = 20, movie_id: int = None, chunk_id: int = None, original_uri: str = None) -> tuple[List[Dict], Optional[str]]:
     """
     비디오에서 주요 장면을 감지하고 각 장면의 대표 프레임을 base64로 반환합니다.
     품질이 좋은 프레임은 S3 thumbnails/ 경로에도 저장합니다.
@@ -161,17 +174,27 @@ def detect_and_embed_scenes(video_path: str, threshold: float = 30.0, max_scenes
         middle_frame = int((scene[0].frame_num + scene[1].frame_num) / 2)
         cap.set(cv2.CAP_PROP_POS_FRAMES, middle_frame)
         ret, frame = cap.read()
+
+        quality_check = check_frame_quality(frame)
+
+        print(f"🔍 Scene {scene_index + 1} 품질 검사:")
+        print(f"   밝기: {quality_check['brightness']:.1f} ({'✅' if quality_check['brightness_ok'] else '❌'})")
+        print(f"   선명도: {quality_check['sharpness']:.1f} ({'✅' if quality_check['sharpness_ok'] else '❌'})")
         
-        if ret:
+        if ret and quality_check['is_good_quality']:
             # 프레임을 base64로 변환 (Bedrock 전송용 - 모든 프레임)
             frame_image = frame_to_base64(frame)
+            
+            # 프레임을 복사하여 저장 (나중에 S3에 저장할 때 사용)
+            frame_copy = frame.copy()
             
             scene_data = {
                 "start_time": scene[0].get_seconds(),
                 "end_time": scene[1].get_seconds(),
                 "start_frame": scene[0].frame_num,
                 "end_frame": scene[1].frame_num,
-                "frame_image": frame_image
+                "frame_image": frame_image,
+                "frame": frame_copy  # 원본 프레임 저장
             }
             
             scenes.append(scene_data)
@@ -192,39 +215,29 @@ def detect_and_embed_scenes(video_path: str, threshold: float = 30.0, max_scenes
     embed_uri_pairs = {}
     saved_uri: Optional[str] = None
 
-    # 품질 검사 및 S3 저장 (최대 20개 장면에 대해서만 수행)
-    if movie_id is not None:
-        print(f"🔍 최대 {len(scenes)}개 장면에 대해 품질 검사 수행...")
-        for scene_index, scene_data in enumerate(scenes):
-            try:
-                # base64 이미지를 다시 프레임으로 변환
-                frame_bytes = base64.b64decode(scene_data["frame_image"])
-                frame_array = np.frombuffer(frame_bytes, dtype=np.uint8)
-                frame = cv2.imdecode(frame_array, cv2.IMREAD_COLOR)
-                
-                quality_check = check_frame_quality(frame)
-                
-                print(f"🔍 Scene {scene_index + 1} 품질 검사:")
-                print(f"   밝기: {quality_check['brightness']:.1f} ({'✅' if quality_check['brightness_ok'] else '❌'})")
-                print(f"   선명도: {quality_check['sharpness']:.1f} ({'✅' if quality_check['sharpness_ok'] else '❌'})")
-                
-                if quality_check['is_good_quality']:
-                    # scene retrieval 과정 수행 필요
-                    # marengo_service에서 aws bedrock marengo embed model 호출하여 임베딩을 받아오는 함수 사용
-                    # 임베딩을 썸네일과 함께 S3에 저장, DB에 메타데이터 저장.
-                    
-                    thumbnail_url = save_thumbnail_to_s3(frame, movie_id, video_name, scene_index + 1, original_uri)
-                    scene_data['thumbnail_url'] = thumbnail_url
+    for scene_index, scene_data in enumerate(scenes):
+        try:
+            # scene retrieval 과정 수행 필요
+            # marengo_service에서 aws bedrock marengo embed model 호출하여 임베딩을 받아오는 함수 사용
+            # 임베딩을 썸네일과 함께 S3에 저장, DB에 메타데이터 저장.
+            
+            # scene_data에 저장된 원본 프레임 사용
+            scene_frame = scene_data.get("frame")
+            if scene_frame is None:
+                print(f"⚠️ Scene {scene_index + 1}: 프레임이 없습니다. 건너뜁니다.")
+                continue
+            
+            thumbnail_url = save_thumbnail_to_s3(scene_frame, movie_id, chunk_id, scene_index + 1, original_uri)
+            scene_data['thumbnail_url'] = thumbnail_url
 
-                    embedded_vector = embed_marengo("image", scene_data["frame_image"])
-                    embed_uri_pairs[thumbnail_url] = embedded_vector
-
-                    print(f"✅ Scene {scene_index + 1}: 품질 양호 → S3 저장 완료")
-                else:
-                    print(f"⚠️ Scene {scene_index + 1}: 품질 부족 → S3 저장 생략")
-                    
-            except Exception as e:
-                print(f"❌ Scene {scene_index + 1} 처리 중 오류: {str(e)}")
+            embedded_vector = embed_marengo("image", scene_data["frame_image"])
+            embed_uri_pairs[thumbnail_url] = embedded_vector
+            
+            # 메모리 절약을 위해 프레임 데이터 제거
+            del scene_data['frame']
+            
+        except Exception as e:
+            print(f"❌ Scene {scene_index + 1} 처리 중 오류: {str(e)}")
 
     if embed_uri_pairs:
         saved_uri = save_json_to_s3(embed_uri_pairs, movie_id, video_name, original_uri=original_uri)
@@ -232,7 +245,7 @@ def detect_and_embed_scenes(video_path: str, threshold: float = 30.0, max_scenes
     
     return scenes, saved_uri
 
-def scene_process(uri: str, threshold: float = 30.0, movie_id: int = None, original_uri: str = None) -> tuple[List[Dict], str]:
+def scene_process(uri: str, threshold: float = 30.0, movie_id: int = None, chunk_id: int = None, original_uri: str = None) -> tuple[List[Dict], str]:
     """
     전체 장면 처리 프로세스입니다. 다음과 같은 과정을 거칩니다.
     1. 해당 비디오를 청크로 분할합니다.
@@ -243,6 +256,7 @@ def scene_process(uri: str, threshold: float = 30.0, movie_id: int = None, origi
         uri: S3 URI (s3://) 또는 로컬 파일 URI (file://)
         threshold: 장면 감지 임계값
         movie_id: 영화 ID
+        chunk_id: 비디오 청크 ID (단일 비디오 모드에서 사용)
         original_uri: 원본 비디오 URI (썸네일 경로 결정용, 단일 비디오 모드에서 사용)
         
     Returns:
@@ -273,7 +287,7 @@ def scene_process(uri: str, threshold: float = 30.0, movie_id: int = None, origi
         
         try:
             # 다운로드받은 영상 장면 감지 직후 임베딩
-            scenes, saved_uri = detect_and_embed_scenes(video_path, threshold, movie_id=movie_id, original_uri=original_uri)
+            scenes, saved_uri = detect_and_embed_scenes(video_path, threshold, movie_id=movie_id, chunk_id=chunk_id, original_uri=original_uri)
             return scenes, saved_uri
         finally:
             # 임시 파일 삭제 (S3에서 다운로드한 경우만)
@@ -306,7 +320,7 @@ def check_frame_quality(frame: np.ndarray) -> Dict[str, float]:
     # 밝기: 30-220 범위가 적절 (기존 50-200에서 완화)
     # 선명도: Laplacian variance > 50이 선명함 (기존 100에서 완화)
     brightness_ok = 30 <= brightness <= 220
-    sharpness_ok = laplacian_var > 30
+    sharpness_ok = laplacian_var > 10
     
     is_good_quality = brightness_ok and sharpness_ok
     
@@ -321,6 +335,7 @@ def check_frame_quality(frame: np.ndarray) -> Dict[str, float]:
 def save_json_to_s3(dict_data: dict, movie_id: int, video_name: str, original_uri: str = None) -> str:
     """
     uri-임베딩 쌍을 원본 비디오와 같은 디렉토리의 embeddings/ 폴더에 저장합니다.
+    기존 데이터가 있으면 병합하여 누적 저장합니다.
     
     Args:
         dict_data: 저장할 JSON 데이터
@@ -336,9 +351,6 @@ def save_json_to_s3(dict_data: dict, movie_id: int, video_name: str, original_ur
     
     # 출력 버킷 가져오기
     output_bucket = get_output_bucket()
-    
-    # JSON 데이터를 문자열로 변환
-    json_data = json.dumps(dict_data)
     
     try:
         # 썸네일 저장 경로 결정
@@ -369,29 +381,118 @@ def save_json_to_s3(dict_data: dict, movie_id: int, video_name: str, original_ur
         
         # 최종 S3 키 생성
         key = f"{embeddings_dir}/{filename}"
+        uri = f"s3://{output_bucket}/{key}"
+        
+        # 기존 데이터 병합 (있으면 다운로드)
+        merged_data = dict_data.copy()
+        try:
+            response = s3.get_object(Bucket=output_bucket, Key=key)
+            existing_data = json.loads(response['Body'].read().decode('utf-8'))
+            print(f"📥 기존 임베딩 데이터 {len(existing_data)}개 발견, 병합 중...")
+            # 기존 데이터를 먼저 넣고 새 데이터로 업데이트 (중복 시 새 데이터 우선)
+            merged_data = {**existing_data, **dict_data}
+            print(f"📊 병합 완료: 기존 {len(existing_data)}개 + 신규 {len(dict_data)}개 = 총 {len(merged_data)}개")
+        except s3.exceptions.NoSuchKey:
+            print(f"📝 기존 임베딩 파일 없음, 새로 생성")
+        except Exception as e:
+            print(f"⚠️ 기존 데이터 로드 실패 (무시하고 새로 저장): {str(e)}")
+        
+        # JSON 데이터를 문자열로 변환
+        json_data = json.dumps(merged_data)
         
         # S3에 업로드
         s3.put_object(Body=json_data, Bucket=output_bucket, Key=key, ContentType='application/json')
         
-        # S3 uri 생성
-        uri = f"s3://{output_bucket}/{key}"
-        
         print(f"✅ 임베딩 저장 완료: {uri}")
         print(f"   경로: {key}")
+        print(f"   총 임베딩 개수: {len(merged_data)}개")
         return uri
         
     except Exception as e:
         print(f"❌ 임베딩 저장 실패: {str(e)}")
         raise e
-
-def save_thumbnail_to_s3(frame: np.ndarray, movie_id: int, video_name: str, scene_index: int, original_uri: str = None) -> str:
+def delete_embeddings_and_thumbnails(movie_id: int, s3_video_uri: str = None) -> bool:
+    """
+    S3에서 embeddings.json 파일과 thumbnails 폴더를 삭제합니다.
+    
+    Args:
+        movie_id: 영화 ID
+        s3_video_uri: 원본 비디오 URI (디렉토리 구조 결정용)
+    
+    Returns:
+        bool: 삭제 성공 여부
+    """
+    try:
+        s3 = boto3.client('s3')
+        output_bucket = get_output_bucket()
+        
+        # 디렉토리 경로 결정
+        if s3_video_uri and s3_video_uri.startswith("s3://"):
+            uri_parts = s3_video_uri.replace("s3://", "").split("/")
+            if len(uri_parts) > 1:
+                directory_path = "/".join(uri_parts[1:-1])
+                if directory_path:
+                    embeddings_dir = f"{directory_path}/embeddings"
+                    thumbnails_dir = f"{directory_path}/thumbnails"
+                else:
+                    embeddings_dir = "embeddings"
+                    thumbnails_dir = "thumbnails"
+            else:
+                embeddings_dir = "embeddings"
+                thumbnails_dir = "thumbnails"
+        else:
+            embeddings_dir = f"embeddings/{movie_id}"
+            thumbnails_dir = f"thumbnails/{movie_id}"
+        
+        deleted_count = 0
+        
+        # embeddings.json 파일 삭제
+        embeddings_key = f"{embeddings_dir}/embeddings.json"
+        try:
+            s3.delete_object(Bucket=output_bucket, Key=embeddings_key)
+            print(f"🗑️ embeddings.json 삭제 완료: {embeddings_key}")
+            deleted_count += 1
+        except s3.exceptions.NoSuchKey:
+            print(f"ℹ️ embeddings.json 파일 없음: {embeddings_key}")
+        except Exception as e:
+            print(f"⚠️ embeddings.json 삭제 실패: {str(e)}")
+        
+        # thumbnails 폴더의 모든 파일 삭제
+        try:
+            # 폴더 내 모든 객체 조회
+            response = s3.list_objects_v2(Bucket=output_bucket, Prefix=thumbnails_dir + "/")
+            
+            if 'Contents' in response:
+                objects_to_delete = [{'Key': obj['Key']} for obj in response['Contents']]
+                
+                if objects_to_delete:
+                    # 배치 삭제
+                    delete_response = s3.delete_objects(
+                        Bucket=output_bucket,
+                        Delete={'Objects': objects_to_delete}
+                    )
+                    deleted_count += len(objects_to_delete)
+                    print(f"🗑️ thumbnails 폴더 삭제 완료: {len(objects_to_delete)}개 파일")
+                else:
+                    print(f"ℹ️ thumbnails 폴더가 비어있음")
+            else:
+                print(f"ℹ️ thumbnails 폴더 없음: {thumbnails_dir}")
+        except Exception as e:
+            print(f"⚠️ thumbnails 폴더 삭제 실패: {str(e)}")
+        
+        print(f"✅ S3 정리 완료: 총 {deleted_count}개 항목 삭제")
+        return True
+        
+    except Exception as e:
+        print(f"❌ S3 삭제 중 오류: {str(e)}")
+        return False
+def save_thumbnail_to_s3(frame: np.ndarray, movie_id: int, chunk_id: int, scene_index: int, original_uri: str = None) -> str:
     """
     썸네일 후보 프레임을 원본 비디오와 같은 디렉토리의 thumbnails/ 폴더에 저장합니다.
     
     Args:
         frame: OpenCV 프레임
         movie_id: 영화 ID
-        video_name: 비디오 파일명
         scene_index: 장면 인덱스
         original_uri: 원본 비디오 URI (디렉토리 구조 유지용)
     
@@ -435,8 +536,7 @@ def save_thumbnail_to_s3(frame: np.ndarray, movie_id: int, video_name: str, scen
             thumbnail_dir = f"thumbnails/{movie_id}"
         
         # 파일명 생성
-        video_basename = os.path.splitext(os.path.basename(video_name))[0]
-        filename = f"{video_basename}_scene_{scene_index}.jpg"
+        filename = f"chunk_{chunk_id}_scene_{scene_index}.jpg"
         
         # 최종 S3 키 생성
         key = f"{thumbnail_dir}/{filename}"
