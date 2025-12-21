@@ -23,8 +23,6 @@ from app.crud import (
 from app.database import SessionLocal
 import asyncio
 import numpy as np
-import base64
-import cv2
 
 def load_prompts(language: str = "kor") -> Dict[str, str]:
     """
@@ -320,78 +318,6 @@ async def get_bedrock_response_with_context(utterances: List[Dict], scene_images
     print("=" * 80)
     print(text_prompt)
     print("=" * 80)
-
-    # scene_images 해상도 변경하여 안전성 보장 (720p)
-    def resize_base64_image(base64_str: str, target_width: int = 1280, target_height: int = 720) -> str:
-        """
-        base64 인코딩된 이미지를 적절한 해상도로 리사이징합니다. (OpenCV 사용)
-        
-        Args:
-            base64_str: base64 인코딩된 이미지 문자열
-            target_width: 목표 너비 (기본값: 1280)
-            target_height: 목표 높이 (기본값: 720)
-        
-        Returns:
-            str: 리사이징된 이미지의 base64 문자열
-        """
-        try:
-            # base64 디코딩
-            image_data = base64.b64decode(base64_str)
-            nparr = np.frombuffer(image_data, np.uint8)
-            image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            
-            if image is None:
-                print(f"⚠️ 이미지 디코딩 실패, 원본 사용")
-                return base64_str
-            
-            # 원본 크기
-            original_height, original_width = image.shape[:2]
-            
-            # 비율을 유지하면서 목표 크기에 맞추기
-            aspect_ratio = original_width / original_height
-            target_aspect = target_width / target_height
-            
-            if aspect_ratio > target_aspect:
-                # 가로가 더 긴 경우
-                new_width = target_width
-                new_height = int(target_width / aspect_ratio)
-            else:
-                # 세로가 더 긴 경우
-                new_height = target_height
-                new_width = int(target_height * aspect_ratio)
-            
-            # 크기가 크게 다르지 않으면 리사이징 건너뛰기 (±10% 이내)
-            if (0.9 * target_width <= original_width <= 1.1 * target_width and 
-                0.9 * target_height <= original_height <= 1.1 * target_height):
-                return base64_str
-            
-            # 리사이징 (INTER_AREA: 축소 시 좋음, INTER_CUBIC: 확대 시 좋음)
-            if new_width < original_width:
-                resized_image = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_AREA)
-            else:
-                resized_image = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
-            
-            # JPEG로 인코딩
-            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 85]
-            _, buffer = cv2.imencode('.jpg', resized_image, encode_param)
-            resized_base64 = base64.b64encode(buffer).decode('utf-8')
-            
-            print(f"   이미지 리사이징: {original_width}x{original_height} → {new_width}x{new_height}")
-            
-            return resized_base64
-            
-        except Exception as e:
-            print(f"⚠️ 이미지 리사이징 실패, 원본 사용: {str(e)}")
-            return base64_str
-    
-    # scene_images 리사이징 처리
-    if scene_images:
-        print(f"🖼️ {len(scene_images)}개 이미지 리사이징 중...")
-        for i, scene in enumerate(scene_images):
-            if scene and scene.get("image"):
-                scene["image"] = resize_base64_image(scene["image"])
-        print(f"✅ 이미지 리사이징 완료")
-        
 
     # 멀티모달 메시지 구성
     content = []
@@ -1122,7 +1048,12 @@ async def process_single_video(s3_video_uri: str, characters_info: str, movie_id
         except:
             pass
         
-        print(f"❌ 오류 발생: {str(e)}")
+        import traceback
+        print(f"❌ 오류 발생: {type(e).__name__}: {str(e)}")
+        print("=" * 80)
+        print("📋 상세 스택 트레이스:")
+        print(traceback.format_exc())
+        print("=" * 80)
         raise RuntimeError(f"원본 비디오 처리 중 오류 발생: {str(e)}")
 
 def save_summary_to_db(movie_id: int, summary_id: int, summary_text: str) -> bool:
@@ -1422,6 +1353,11 @@ async def process_videos_from_folder(s3_folder_path: str, characters_info: str, 
         except:
             pass
         
-        print(f"❌ 오류 발생: {str(e)}")
+        import traceback
+        print(f"❌ 오류 발생: {type(e).__name__}: {str(e)}")
+        print("=" * 80)
+        print("📋 상세 스택 트레이스:")
+        print(traceback.format_exc())
+        print("=" * 80)
         raise RuntimeError(f"S3 폴더 비디오 처리 중 오류 발생: {str(e)}")
 
