@@ -24,8 +24,7 @@ from app.database import SessionLocal
 import asyncio
 import numpy as np
 import base64
-from io import BytesIO
-from PIL import Image
+import cv2
 
 def load_prompts(language: str = "kor") -> Dict[str, str]:
     """
@@ -325,7 +324,7 @@ async def get_bedrock_response_with_context(utterances: List[Dict], scene_images
     # scene_images 해상도 변경하여 안전성 보장 (720p)
     def resize_base64_image(base64_str: str, target_width: int = 1280, target_height: int = 720) -> str:
         """
-        base64 인코딩된 이미지를 적절한 해상도로 리사이징합니다.
+        base64 인코딩된 이미지를 적절한 해상도로 리사이징합니다. (OpenCV 사용)
         
         Args:
             base64_str: base64 인코딩된 이미지 문자열
@@ -338,12 +337,16 @@ async def get_bedrock_response_with_context(utterances: List[Dict], scene_images
         try:
             # base64 디코딩
             image_data = base64.b64decode(base64_str)
-            image = Image.open(BytesIO(image_data))
+            nparr = np.frombuffer(image_data, np.uint8)
+            image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            
+            if image is None:
+                print(f"⚠️ 이미지 디코딩 실패, 원본 사용")
+                return base64_str
             
             # 원본 크기
-            original_width, original_height = image.size
+            original_height, original_width = image.shape[:2]
             
-            # 이미지가 너무 크거나 작으면 리사이징
             # 비율을 유지하면서 목표 크기에 맞추기
             aspect_ratio = original_width / original_height
             target_aspect = target_width / target_height
@@ -362,17 +365,16 @@ async def get_bedrock_response_with_context(utterances: List[Dict], scene_images
                 0.9 * target_height <= original_height <= 1.1 * target_height):
                 return base64_str
             
-            # 리사이징
-            resized_image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            # 리사이징 (INTER_AREA: 축소 시 좋음, INTER_CUBIC: 확대 시 좋음)
+            if new_width < original_width:
+                resized_image = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_AREA)
+            else:
+                resized_image = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
             
-            # JPEG로 변환 (RGB 모드로)
-            if resized_image.mode != 'RGB':
-                resized_image = resized_image.convert('RGB')
-            
-            # base64로 다시 인코딩
-            buffer = BytesIO()
-            resized_image.save(buffer, format='JPEG', quality=85)
-            resized_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+            # JPEG로 인코딩
+            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 85]
+            _, buffer = cv2.imencode('.jpg', resized_image, encode_param)
+            resized_base64 = base64.b64encode(buffer).decode('utf-8')
             
             print(f"   이미지 리사이징: {original_width}x{original_height} → {new_width}x{new_height}")
             
