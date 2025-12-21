@@ -140,7 +140,7 @@ def cleanup_chunk_file(file_path: str):
     except Exception as e:
         print(f"⚠️ 청크 파일 삭제 실패: {file_path} - {str(e)}")
 
-def generate_video_chunks_info(s3_uri: str, segment_duration: int = 600) -> List[Dict]:
+def generate_video_chunks_info(s3_uri: str) -> List[Dict]:
     """
     원본 비디오를 기반으로 청크 정보 리스트를 생성합니다.
     실제 파일을 생성하지 않고 메타데이터만 반환합니다.
@@ -160,6 +160,12 @@ def generate_video_chunks_info(s3_uri: str, segment_duration: int = 600) -> List
         chunks = []
         start_time = 0
         chunk_order = 1
+
+
+        # Dynamic Segement Length Handling
+        total_minutes = total_duration / 60
+        sqrt_total_minutes = round(total_minutes ** 0.5) + 1 # 0이 되는것 방지
+        segment_duration = sqrt_total_minutes * 60  # 초 단위
         
         while start_time < total_duration:
             # 남은 시간이 segment_duration보다 작으면 남은 시간만큼
@@ -177,7 +183,7 @@ def generate_video_chunks_info(s3_uri: str, segment_duration: int = 600) -> List
         
         print(f"📁 총 {len(chunks)}개의 청크로 분할 예정 (각 최대 {segment_duration/60:.1f}분)")
         
-        return chunks
+        return chunks, segment_duration
         
     except Exception as e:
         raise RuntimeError(f"비디오 청크 정보 생성 실패: {str(e)}")

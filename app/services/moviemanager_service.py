@@ -764,15 +764,15 @@ async def process_single_video(s3_video_uri: str, characters_info: str, movie_id
         Dict: 처리 결과
     """
     try:
+        # 청크 정보 생성 (실제 파일 생성 없이 메타데이터만)
+        chunks_info, segment_duration = generate_video_chunks_info(s3_video_uri)
+        total_chunks = len(chunks_info)
+
         print(f"🎬 원본 비디오 동적 청크 처리 시작")
         print(f"   원본 URI: {s3_video_uri}")
         print(f"   Movie ID: {movie_id}")
         print(f"   세그먼트 길이: {segment_duration}초 ({segment_duration/60:.1f}분)")
         print("=" * 80)
-        
-        # 청크 정보 생성 (실제 파일 생성 없이 메타데이터만)
-        chunks_info = generate_video_chunks_info(s3_video_uri, segment_duration)
-        total_chunks = len(chunks_info)
         
         # init 파라미터에 따른 처리
         start_from = 0
@@ -941,7 +941,7 @@ async def process_single_video(s3_video_uri: str, characters_info: str, movie_id
                 # scene_selections를 chunk_n_scene_m 형태의 문자열로 변환
                 adjusted_scene_selections = {}
                 for query, indices in scene_selections.items():
-                    scene_strings = [f"chunk_{current_chunk}_scene_{idx}" for idx in indices]
+                    scene_strings = [f"chunk_{current_chunk}_scene_{idx + 1}" for idx in indices]
                     adjusted_scene_selections[query] = scene_strings
                     print(f"   '{query}': 장면 {indices} → {scene_strings}")
                 
