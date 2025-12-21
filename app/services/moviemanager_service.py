@@ -23,6 +23,9 @@ from app.crud import (
 from app.database import SessionLocal
 import asyncio
 import numpy as np
+import base64
+from io import BytesIO
+from PIL import Image
 
 def load_prompts(language: str = "kor") -> Dict[str, str]:
     """
@@ -318,6 +321,75 @@ async def get_bedrock_response_with_context(utterances: List[Dict], scene_images
     print("=" * 80)
     print(text_prompt)
     print("=" * 80)
+
+    # scene_images 해상도 변경하여 안전성 보장 (720p)
+    def resize_base64_image(base64_str: str, target_width: int = 1280, target_height: int = 720) -> str:
+        """
+        base64 인코딩된 이미지를 적절한 해상도로 리사이징합니다.
+        
+        Args:
+            base64_str: base64 인코딩된 이미지 문자열
+            target_width: 목표 너비 (기본값: 1280)
+            target_height: 목표 높이 (기본값: 720)
+        
+        Returns:
+            str: 리사이징된 이미지의 base64 문자열
+        """
+        try:
+            # base64 디코딩
+            image_data = base64.b64decode(base64_str)
+            image = Image.open(BytesIO(image_data))
+            
+            # 원본 크기
+            original_width, original_height = image.size
+            
+            # 이미지가 너무 크거나 작으면 리사이징
+            # 비율을 유지하면서 목표 크기에 맞추기
+            aspect_ratio = original_width / original_height
+            target_aspect = target_width / target_height
+            
+            if aspect_ratio > target_aspect:
+                # 가로가 더 긴 경우
+                new_width = target_width
+                new_height = int(target_width / aspect_ratio)
+            else:
+                # 세로가 더 긴 경우
+                new_height = target_height
+                new_width = int(target_height * aspect_ratio)
+            
+            # 크기가 크게 다르지 않으면 리사이징 건너뛰기 (±10% 이내)
+            if (0.9 * target_width <= original_width <= 1.1 * target_width and 
+                0.9 * target_height <= original_height <= 1.1 * target_height):
+                return base64_str
+            
+            # 리사이징
+            resized_image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            
+            # JPEG로 변환 (RGB 모드로)
+            if resized_image.mode != 'RGB':
+                resized_image = resized_image.convert('RGB')
+            
+            # base64로 다시 인코딩
+            buffer = BytesIO()
+            resized_image.save(buffer, format='JPEG', quality=85)
+            resized_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+            
+            print(f"   이미지 리사이징: {original_width}x{original_height} → {new_width}x{new_height}")
+            
+            return resized_base64
+            
+        except Exception as e:
+            print(f"⚠️ 이미지 리사이징 실패, 원본 사용: {str(e)}")
+            return base64_str
+    
+    # scene_images 리사이징 처리
+    if scene_images:
+        print(f"🖼️ {len(scene_images)}개 이미지 리사이징 중...")
+        for i, scene in enumerate(scene_images):
+            if scene and scene.get("image"):
+                scene["image"] = resize_base64_image(scene["image"])
+        print(f"✅ 이미지 리사이징 완료")
+        
 
     # 멀티모달 메시지 구성
     content = []
