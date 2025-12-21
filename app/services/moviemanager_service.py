@@ -373,14 +373,24 @@ async def get_bedrock_response_with_context(utterances: List[Dict], scene_images
             
             for idx, query in enumerate(retrieval_queries, 1):
                 # 각 검색어에 대한 장면 번호 찾기
-                pattern = f"{idx}\.\s*{re.escape(query)}[:\s]+(.+)"
+                # 해당 줄만 매칭하도록 수정 (줄바꿈 전까지만, 공백도 줄바꿈 제외)
+                pattern = f"{idx}\\.\\s*{re.escape(query)}:[ \\t]*([^\\n]*)"
                 match = re.search(pattern, selection_text)
                 if match:
-                    scene_numbers_str = match.group(1)
-                    # 숫자만 추출
-                    scene_numbers = [int(n) for n in re.findall(r'\d+', scene_numbers_str)]
-                    scene_selections[query] = scene_numbers
-                    print(f"  {query}: Scene {scene_numbers}")
+                    scene_numbers_str = match.group(1).strip()
+                    # 빈 문자열이 아닌 경우에만 숫자 추출
+                    if scene_numbers_str:
+                        # 숫자만 추출
+                        scene_numbers = [int(n) for n in re.findall(r'\d+', scene_numbers_str)]
+                        if scene_numbers:
+                            scene_selections[query] = scene_numbers
+                            print(f"  {query}: Scene {scene_numbers}")
+                        else:
+                            scene_selections[query] = []
+                            print(f"  {query}: 선택된 장면 없음 (숫자 없음)")
+                    else:
+                        scene_selections[query] = []
+                        print(f"  {query}: 선택된 장면 없음 (빈 응답)")
                 else:
                     scene_selections[query] = []
                     print(f"  {query}: 선택된 장면 없음")
@@ -518,46 +528,54 @@ async def get_final_scenes(custom_retrievals: List[str], movie_id: int, video_su
     print("🌐 커스텀 검색어 번역 처리 중...")
     translated_retrievals = await translate_with_claude(custom_retrievals)
     
-    # 각 청크에서 LLM이 선택한 장면 인덱스 수집
+    # 각 청크에서 LLM이 선택한 장면 문자열 수집
     for i, retrieval in enumerate(custom_retrievals):
         print(f"\n🔍 검색어 처리 중: '{retrieval}'")
         
-        selected_scene_indices = []
+        selected_scene_strings = []
         
         # 모든 청크를 순회하며 해당 검색어에 대해 선택된 장면 수집
         for vs in video_summaries:
             scene_selections = vs.get("scene_selections", {})
             if retrieval in scene_selections:
-                chunk_selected = scene_selections[retrieval]
-                selected_scene_indices.extend(chunk_selected)
+                chunk_selected = scene_selections[retrieval]  # chunk_n_scene_m 형태의 문자열 리스트
+                selected_scene_strings.extend(chunk_selected)
         
-        if not selected_scene_indices:
+        if not selected_scene_strings:
             print(f"⚠️ LLM이 '{retrieval}'에 관련된 장면을 찾지 못했습니다.")
-            selected_scene_indices = []
+            selected_scene_strings = []
         
-        # 선택된 장면들이 전체 장면 수를 초과하지 않도록 필터링
-        valid_indices = [idx for idx in selected_scene_indices if idx < len(uri_list)]
+        # chunk_n_scene_m 문자열을 URI와 매칭
+        selected_uris_from_llm = []
+        for scene_str in selected_scene_strings:
+            # URI 리스트에서 해당 문자열을 포함하는 URI 찾기
+            matched_uris = [uri for uri in uri_list if scene_str in uri]
+            if matched_uris:
+                selected_uris_from_llm.append(matched_uris[0])  # 첫 번째 매칭 URI 사용
+                print(f"   {scene_str} → {matched_uris[0]}")
+            else:
+                print(f"   ⚠️ {scene_str}에 매칭되는 URI 없음")
         
-        if not valid_indices:
-            print(f"⚠️ LLM이 찾은 장면 인덱스가 범위를 벗어났습니다.")
-            valid_indices = []
+        if not selected_uris_from_llm:
+            print(f"⚠️ 매칭된 URI가 없습니다.")
         
-        print(f"📋 LLM이 선택한 장면: {len(valid_indices)}개")
+        print(f"📋 LLM이 선택한 장면: {len(selected_uris_from_llm)}개")
         
         # 검색어 임베딩
         text_vector = embed_marengo("text", translated_retrievals[i])
         text_vector = np.array(text_vector) / np.linalg.norm(text_vector)
         
         # LLM이 선택한 장면이 3개 미만인 경우
-        if len(valid_indices) < 3:
-            needed_count = 3 - len(valid_indices)
-            print(f"⚠️ LLM 선택 장면이 3개 미만입니다. LLM 선택 {len(valid_indices)}개 + 유사도 분석 {needed_count}개")
+        if len(selected_uris_from_llm) < 3:
+            needed_count = 3 - len(selected_uris_from_llm)
+            print(f"⚠️ LLM 선택 장면이 3개 미만입니다. LLM 선택 {len(selected_uris_from_llm)}개 + 유사도 분석 {needed_count}개")
             
             # LLM이 선택한 장면들의 URI를 먼저 추가
-            selected_uris = [uri_list[idx] for idx in valid_indices]
+            selected_uris = selected_uris_from_llm.copy()
             
-            # LLM이 선택하지 않은 나머지 장면들의 인덱스
-            remaining_indices = [i for i in range(len(uri_list)) if i not in valid_indices]
+            # LLM이 선택하지 않은 나머지 장면들
+            remaining_uris = [uri for uri in uri_list if uri not in selected_uris_from_llm]
+            remaining_indices = [uri_list.index(uri) for uri in remaining_uris]
             
             if remaining_indices:
                 # 나머지 장면들에 대해 유사도 계산
@@ -573,17 +591,18 @@ async def get_final_scenes(custom_retrievals: List[str], movie_id: int, video_su
                 selected_uris.extend(additional_uris)
                 
             result[retrieval] = selected_uris
-            print(f"✅ 최종 선택: LLM {len(valid_indices)}개 + 유사도 {len(selected_uris) - len(valid_indices)}개 = 총 {len(result[retrieval])}개")
+            print(f"✅ 최종 선택: LLM {len(selected_uris_from_llm)}개 + 유사도 {len(selected_uris) - len(selected_uris_from_llm)}개 = 총 {len(result[retrieval])}개")
         else:
             # 선택된 장면들 중 벡터 유사도 높은 top-3 선택
-            selected_uris = [uri_list[idx] for idx in valid_indices]
-            selected_feats = scene_feat_matrix[valid_indices]
+            selected_uris = selected_uris_from_llm.copy()
+            selected_indices = [uri_list.index(uri) for uri in selected_uris_from_llm]
+            selected_feats = scene_feat_matrix[selected_indices]
             
             # 코사인 유사도 계산
             similarities = np.dot(selected_feats, text_vector)
             
             # top-3 선택
-            top_k = min(3, len(valid_indices))
+            top_k = min(3, len(selected_uris))
             top_k_indices = np.argsort(-similarities)[:top_k]
             
             result[retrieval] = [selected_uris[idx] for idx in top_k_indices]
@@ -852,9 +871,6 @@ async def process_single_video(s3_video_uri: str, characters_info: str, movie_id
         db.close()
         print(f"프롬프트 {len(custom_prompts)}개, 검색어 {len(custom_retrievals)}개 로드 완료")
         
-        # 누적 장면 개수 추적 (각 청크의 장면 인덱스를 전체 비디오 기준으로 변환하기 위함)
-        cumulative_scene_count = 0
-        
         # start_from 인덱스부터 청크 처리 시작
         for i in range(start_from, total_chunks):
             chunk_info = chunks_info[i]
@@ -922,12 +938,12 @@ async def process_single_video(s3_video_uri: str, characters_info: str, movie_id
                 )
                 print(f"✅ Claude 요약 생성 완료 (길이: {len(summary)} 문자)")
                 
-                # scene_selections의 인덱스를 누적 인덱스로 변환
+                # scene_selections를 chunk_n_scene_m 형태의 문자열로 변환
                 adjusted_scene_selections = {}
                 for query, indices in scene_selections.items():
-                    adjusted_indices = [idx + cumulative_scene_count for idx in indices]
-                    adjusted_scene_selections[query] = adjusted_indices
-                    print(f"   '{query}': 장면 {indices} → 누적 인덱스 {adjusted_indices}")
+                    scene_strings = [f"chunk_{current_chunk}_scene_{idx}" for idx in indices]
+                    adjusted_scene_selections[query] = scene_strings
+                    print(f"   '{query}': 장면 {indices} → {scene_strings}")
                 
                 # 요약을 데이터베이스에 저장 (청크 순서에 맞는 summary_id 사용)
                 print(f"💾 데이터베이스 저장 시작...")
@@ -947,12 +963,8 @@ async def process_single_video(s3_video_uri: str, characters_info: str, movie_id
                     "summary_id": summary_id,
                     "scenes": scenes,  # 장면 정보 저장
                     "utterances": utterances,  # STT 정보 저장
-                    "scene_selections": adjusted_scene_selections  # 누적 인덱스로 조정된 장면 저장
+                    "scene_selections": adjusted_scene_selections  # chunk_n_scene_m 형태로 저장
                 })
-                
-                # 다음 청크를 위해 누적 장면 개수 업데이트
-                cumulative_scene_count += len(scenes) if scenes else 0
-                print(f"📊 누적 장면 개수: {cumulative_scene_count}개")
                 
                 # 다음 청크 처리를 위해 이전 요약에 추가
                 previous_summaries.append(summary)
