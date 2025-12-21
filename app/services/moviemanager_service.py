@@ -4,7 +4,7 @@ import boto3
 import re
 from typing import List, Dict
 from app.services.transcribe_service import transcribe_video
-from app.services.scene_service import scene_process, download_json_from_s3
+from app.services.scene_service import scene_process, download_json_from_s3, delete_embeddings_and_thumbnails
 from app.services.video_chunk_service import generate_video_chunks_info, extract_chunk_for_processing, cleanup_chunk_file
 from app.services.marengo_service import embed_marengo
 from app.crud import (
@@ -229,6 +229,72 @@ def create_claude_prompt_with_context(utterances: List[Dict], scene_images: List
     
     return prompt
 
+async def translate_with_claude(text_list: list[str]) -> list[str]:
+    """
+    자동으로 비영어권 텍스트면 영어로 번역합니다.
+    args:
+        text_list: 번역할 텍스트 리스트
+    returns:
+        list[str]: 번역된 텍스트 리스트
+    """
+
+    bedrock = boto3.client(
+        service_name='bedrock-runtime',
+        region_name=os.getenv("AWS_DEFAULT_REGION")
+    )
+    model_id = os.getenv("CLAUDE_MODEL_ID")
+
+    # convert text to string by list comprehension
+    prompt = """Translate the following text to English.
+    If its already in English, just repeat it.
+    just output the translated text without any extra explanation.
+    split each output text with '###' symbol."""
+    
+    prompt += "\n\n" + " ### ".join(text_list)
+
+    request_body = {
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 4096,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": prompt
+                    }
+                ]
+            }
+        ]
+    }
+
+    response = bedrock.invoke_model(
+        modelId=model_id,
+        body=json.dumps(request_body)
+    )
+
+    response_body = json.loads(response['body'].read())
+    translated_text = response_body['content'][0]['text']
+
+    # 디버깅: 모델 답변 출력
+    print("🤖 TRANSLATED RESPONSE:")
+    print("=" * 80)
+    print(translated_text)
+    print("=" * 80)
+
+    # 파싱 ### 구분자로 분리
+    try:
+        translated_list = [part.strip() for part in translated_text.split("###")]
+        translated_list = [part for part in translated_list if part]  # 빈 문자열 제거
+        print(f"✅ 번역된 텍스트 개수: {len(translated_list)}")
+        if len(translated_list) != len(text_list):
+            raise ValueError("번역된 텍스트 개수가 입력 텍스트 개수와 일치하지 않습니다.")
+        return translated_list
+    except Exception as e:
+        print(f"❌ 번역 파싱 중 오류: {str(e)}")
+        return text_list  # 오류 시 원본 텍스트 반환
+
+
 async def get_bedrock_response_with_context(utterances: List[Dict], scene_images: List[Dict], characters_info: str, previous_summaries: List[str] = None, current_video_index: int = 0, prompt_language: str = "kor", custom_utterance = None, with_cw=True, retrieval_queries: List[str] = None) -> tuple[str, Dict[str, List[int]]]:
     """
     Rolling Context 기법으로 최근 3개 비디오 요약만 컨텍스트로 포함하여 Bedrock Claude 응답을 생성합니다.
@@ -307,14 +373,24 @@ async def get_bedrock_response_with_context(utterances: List[Dict], scene_images
             
             for idx, query in enumerate(retrieval_queries, 1):
                 # 각 검색어에 대한 장면 번호 찾기
-                pattern = f"{idx}\.\s*{re.escape(query)}[:\s]+(.+)"
+                # 해당 줄만 매칭하도록 수정 (줄바꿈 전까지만, 공백도 줄바꿈 제외)
+                pattern = f"{idx}\\.\\s*{re.escape(query)}:[ \\t]*([^\\n]*)"
                 match = re.search(pattern, selection_text)
                 if match:
-                    scene_numbers_str = match.group(1)
-                    # 숫자만 추출
-                    scene_numbers = [int(n) for n in re.findall(r'\d+', scene_numbers_str)]
-                    scene_selections[query] = scene_numbers
-                    print(f"  {query}: Scene {scene_numbers}")
+                    scene_numbers_str = match.group(1).strip()
+                    # 빈 문자열이 아닌 경우에만 숫자 추출
+                    if scene_numbers_str:
+                        # 숫자만 추출
+                        scene_numbers = [int(n) for n in re.findall(r'\d+', scene_numbers_str)]
+                        if scene_numbers:
+                            scene_selections[query] = scene_numbers
+                            print(f"  {query}: Scene {scene_numbers}")
+                        else:
+                            scene_selections[query] = []
+                            print(f"  {query}: 선택된 장면 없음 (숫자 없음)")
+                    else:
+                        scene_selections[query] = []
+                        print(f"  {query}: 선택된 장면 없음 (빈 응답)")
                 else:
                     scene_selections[query] = []
                     print(f"  {query}: 선택된 장면 없음")
@@ -447,52 +523,90 @@ async def get_final_scenes(custom_retrievals: List[str], movie_id: int, video_su
     scene_feat_matrix = scene_feat_matrix / np.linalg.norm(scene_feat_matrix, axis=1, keepdims=True)
     
     result = {}
+
+    # custom_retrievals가 영어가 아닌 경우 bedrock 요청 통해 번역
+    print("🌐 커스텀 검색어 번역 처리 중...")
+    translated_retrievals = await translate_with_claude(custom_retrievals)
     
-    # 각 청크에서 LLM이 선택한 장면 인덱스 수집
-    for retrieval in custom_retrievals:
+    # 각 청크에서 LLM이 선택한 장면 문자열 수집
+    for i, retrieval in enumerate(custom_retrievals):
         print(f"\n🔍 검색어 처리 중: '{retrieval}'")
         
-        selected_scene_indices = []
+        selected_scene_strings = []
         
         # 모든 청크를 순회하며 해당 검색어에 대해 선택된 장면 수집
         for vs in video_summaries:
             scene_selections = vs.get("scene_selections", {})
             if retrieval in scene_selections:
-                chunk_selected = scene_selections[retrieval]
-                selected_scene_indices.extend(chunk_selected)
+                chunk_selected = scene_selections[retrieval]  # chunk_n_scene_m 형태의 문자열 리스트
+                selected_scene_strings.extend(chunk_selected)
         
-        if not selected_scene_indices:
+        if not selected_scene_strings:
             print(f"⚠️ LLM이 '{retrieval}'에 관련된 장면을 찾지 못했습니다.")
-            result[retrieval] = []
-            continue
+            selected_scene_strings = []
         
-        # 선택된 장면들이 전체 장면 수를 초과하지 않도록 필터링
-        valid_indices = [idx for idx in selected_scene_indices if idx < len(uri_list)]
+        # chunk_n_scene_m 문자열을 URI와 매칭
+        selected_uris_from_llm = []
+        for scene_str in selected_scene_strings:
+            # URI 리스트에서 해당 문자열을 포함하는 URI 찾기
+            matched_uris = [uri for uri in uri_list if scene_str in uri]
+            if matched_uris:
+                selected_uris_from_llm.append(matched_uris[0])  # 첫 번째 매칭 URI 사용
+                print(f"   {scene_str} → {matched_uris[0]}")
+            else:
+                print(f"   ⚠️ {scene_str}에 매칭되는 URI 없음")
         
-        if not valid_indices:
-            print(f"⚠️ 유효한 장면 인덱스가 없습니다.")
-            result[retrieval] = []
-            continue
+        if not selected_uris_from_llm:
+            print(f"⚠️ 매칭된 URI가 없습니다.")
         
-        print(f"📋 LLM이 선택한 장면: {len(valid_indices)}개")
-        
-        # 선택된 장면들 중 벡터 유사도 높은 top-3 선택
-        selected_uris = [uri_list[idx] for idx in valid_indices]
-        selected_feats = scene_feat_matrix[valid_indices]
+        print(f"📋 LLM이 선택한 장면: {len(selected_uris_from_llm)}개")
         
         # 검색어 임베딩
-        text_vector = embed_marengo("text", retrieval)
+        text_vector = embed_marengo("text", translated_retrievals[i])
         text_vector = np.array(text_vector) / np.linalg.norm(text_vector)
         
-        # 코사인 유사도 계산
-        similarities = np.dot(selected_feats, text_vector)
-        
-        # top-3 선택
-        top_k = min(3, len(valid_indices))
-        top_k_indices = np.argsort(-similarities)[:top_k]
-        
-        result[retrieval] = [selected_uris[idx] for idx in top_k_indices]
-        print(f"✅ 최종 선택된 장면: {len(result[retrieval])}개")
+        # LLM이 선택한 장면이 3개 미만인 경우
+        if len(selected_uris_from_llm) < 3:
+            needed_count = 3 - len(selected_uris_from_llm)
+            print(f"⚠️ LLM 선택 장면이 3개 미만입니다. LLM 선택 {len(selected_uris_from_llm)}개 + 유사도 분석 {needed_count}개")
+            
+            # LLM이 선택한 장면들의 URI를 먼저 추가
+            selected_uris = selected_uris_from_llm.copy()
+            
+            # LLM이 선택하지 않은 나머지 장면들
+            remaining_uris = [uri for uri in uri_list if uri not in selected_uris_from_llm]
+            remaining_indices = [uri_list.index(uri) for uri in remaining_uris]
+            
+            if remaining_indices:
+                # 나머지 장면들에 대해 유사도 계산
+                remaining_feats = scene_feat_matrix[remaining_indices]
+                remaining_similarities = np.dot(remaining_feats, text_vector)
+                
+                # 필요한 개수만큼 top-k 선택
+                top_k = min(needed_count, len(remaining_indices))
+                top_k_indices = np.argsort(-remaining_similarities)[:top_k]
+                
+                # 추가 장면 URI 추가
+                additional_uris = [uri_list[remaining_indices[idx]] for idx in top_k_indices]
+                selected_uris.extend(additional_uris)
+                
+            result[retrieval] = selected_uris
+            print(f"✅ 최종 선택: LLM {len(selected_uris_from_llm)}개 + 유사도 {len(selected_uris) - len(selected_uris_from_llm)}개 = 총 {len(result[retrieval])}개")
+        else:
+            # 선택된 장면들 중 벡터 유사도 높은 top-3 선택
+            selected_uris = selected_uris_from_llm.copy()
+            selected_indices = [uri_list.index(uri) for uri in selected_uris_from_llm]
+            selected_feats = scene_feat_matrix[selected_indices]
+            
+            # 코사인 유사도 계산
+            similarities = np.dot(selected_feats, text_vector)
+            
+            # top-3 선택
+            top_k = min(3, len(selected_uris))
+            top_k_indices = np.argsort(-similarities)[:top_k]
+            
+            result[retrieval] = [selected_uris[idx] for idx in top_k_indices]
+            print(f"✅ LLM 선택 장면에서 최종 선택된 장면: {len(result[retrieval])}개")
     
     return result
 
@@ -671,6 +785,11 @@ async def process_single_video(s3_video_uri: str, characters_info: str, movie_id
             update_movie_status(db, movie_id, "PENDING")  # 상태를 PENDING으로 리셋
             db.close()
             print(f"🗑️ 기존 요약 {deleted_count}개 삭제 완료")
+            
+            # S3에 있는 embeddings.json과 thumbnails 폴더 삭제
+            print("🗑️ S3 정리 시작...")
+            delete_embeddings_and_thumbnails(movie_id, s3_video_uri)
+
             print(f"📊 Movie 상태 리셋: PENDING")
             
         else:
@@ -775,7 +894,7 @@ async def process_single_video(s3_video_uri: str, characters_info: str, movie_id
                 
                 # transcribe process와 scene process 병렬 처리
                 transcribe_task = asyncio.to_thread(transcribe_video, chunk_uri, language_code)
-                scene_task = asyncio.to_thread(scene_process, chunk_uri, threshold, movie_id, s3_video_uri)
+                scene_task = asyncio.to_thread(scene_process, chunk_uri, threshold, movie_id, current_chunk, s3_video_uri)
 
                 utterances, (scenes, saved_uri) = await asyncio.gather(transcribe_task, scene_task)
 
@@ -819,6 +938,13 @@ async def process_single_video(s3_video_uri: str, characters_info: str, movie_id
                 )
                 print(f"✅ Claude 요약 생성 완료 (길이: {len(summary)} 문자)")
                 
+                # scene_selections를 chunk_n_scene_m 형태의 문자열로 변환
+                adjusted_scene_selections = {}
+                for query, indices in scene_selections.items():
+                    scene_strings = [f"chunk_{current_chunk}_scene_{idx}" for idx in indices]
+                    adjusted_scene_selections[query] = scene_strings
+                    print(f"   '{query}': 장면 {indices} → {scene_strings}")
+                
                 # 요약을 데이터베이스에 저장 (청크 순서에 맞는 summary_id 사용)
                 print(f"💾 데이터베이스 저장 시작...")
                 summary_id = i + 1  # 청크 순서와 동일하게 (1부터 시작)
@@ -837,7 +963,7 @@ async def process_single_video(s3_video_uri: str, characters_info: str, movie_id
                     "summary_id": summary_id,
                     "scenes": scenes,  # 장면 정보 저장
                     "utterances": utterances,  # STT 정보 저장
-                    "scene_selections": scene_selections  # LLM이 선택한 장면 저장
+                    "scene_selections": adjusted_scene_selections  # chunk_n_scene_m 형태로 저장
                 })
                 
                 # 다음 청크 처리를 위해 이전 요약에 추가
@@ -858,8 +984,6 @@ async def process_single_video(s3_video_uri: str, characters_info: str, movie_id
         db.close()
         print(f"📊 Movie 상태 업데이트: ORGANIZING")
 
-
-
         # 프롬프트가 너무 많다면 10개로 제한
         if len(custom_prompts) > 10:
             custom_prompts = custom_prompts[:10]
@@ -869,13 +993,14 @@ async def process_single_video(s3_video_uri: str, characters_info: str, movie_id
             print(f"⚠️ 검색어 개수가 너무 많아 10개로 제한합니다.")
         
         print("🎭 최종 프롬프트 응답 결과 생성 중...")
+
         # 최종 프롬프트 응답 결과 생성
         final_summary = await create_final_results([vs["summary"] for vs in video_summaries], custom_prompts, characters_info, prompt_language)
-        print(f"✅ 최종 요약 생성 완료")
+        print(f"✅ 최종 요약 생성 완료")     
 
         # 최종 장면 검색 결과 생성 (LLM 선택 + 벡터 유사도)
-        final_scenes = await get_final_scenes(custom_retrievals, movie_id, video_summaries)
         # s3 uri들의 리스트의 딕셔너리 형태가 되어야 할 것.
+        final_scenes = await get_final_scenes(custom_retrievals, movie_id, video_summaries)
         
         # 빈 딕셔너리가 아닌 경우에만 출력
         if final_scenes:
