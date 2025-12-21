@@ -162,6 +162,27 @@ def detect_and_embed_scenes(video_path: str, threshold: float = 30.0, max_scenes
     # 장면 감지
     scene_list = detect(video_path, ContentDetector(threshold=threshold))
     
+    print(f"🎬 감지된 총 장면 수: {len(scene_list)}개")
+    
+    # 장면이 max_scenes_count 초과일 경우, 시간별로 균일하게 분포하도록 먼저 제한
+    if len(scene_list) > max_scenes_count:
+        print(f"📊 장면 수가 {max_scenes_count}개를 초과하여 interval 기반 선택 적용")
+        
+        # 시간 범위 계산
+        total_duration = scene_list[-1][1].get_seconds() - scene_list[0][0].get_seconds()
+        interval = total_duration / max_scenes_count
+        
+        # interval 기반으로 장면 선택
+        selected_scenes = []
+        for i in range(max_scenes_count):
+            target_time = scene_list[0][0].get_seconds() + i * interval
+            closest_scene = min(scene_list, key=lambda x: abs(x[0].get_seconds() - target_time))
+            if closest_scene not in selected_scenes:  # 중복 방지
+                selected_scenes.append(closest_scene)
+        
+        scene_list = selected_scenes
+        print(f"✅ {len(scene_list)}개 장면으로 제한됨")
+    
     # 비디오 열기
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS)
@@ -175,17 +196,21 @@ def detect_and_embed_scenes(video_path: str, threshold: float = 30.0, max_scenes
         cap.set(cv2.CAP_PROP_POS_FRAMES, middle_frame)
         ret, frame = cap.read()
 
+        if not ret:
+            print(f"⚠️ Scene {scene_index + 1}: 프레임 읽기 실패")
+            continue
+
         quality_check = check_frame_quality(frame)
 
         print(f"🔍 Scene {scene_index + 1} 품질 검사:")
         print(f"   밝기: {quality_check['brightness']:.1f} ({'✅' if quality_check['brightness_ok'] else '❌'})")
         print(f"   선명도: {quality_check['sharpness']:.1f} ({'✅' if quality_check['sharpness_ok'] else '❌'})")
         
-        if ret and quality_check['is_good_quality']:
-            # 프레임을 base64로 변환 (Bedrock 전송용 - 모든 프레임)
+        if quality_check['is_good_quality']:
+            # 프레임을 base64로 변환 (Bedrock 전송용)
             frame_image = frame_to_base64(frame)
             
-            # 프레임을 복사하여 저장 (나중에 S3에 저장할 때 사용)
+            # 프레임을 복사하여 저장 (S3 저장용)
             frame_copy = frame.copy()
             
             scene_data = {
@@ -194,23 +219,16 @@ def detect_and_embed_scenes(video_path: str, threshold: float = 30.0, max_scenes
                 "start_frame": scene[0].frame_num,
                 "end_frame": scene[1].frame_num,
                 "frame_image": frame_image,
-                "frame": frame_copy  # 원본 프레임 저장
+                "frame": frame_copy
             }
             
             scenes.append(scene_data)
+        else:
+            print(f"   ⚠️ 품질 부족으로 제외됨")
     
     cap.release()
-
-    # 장면이 20개 초과일 경우, 시간별로 균일하게 분포하도록 최대 20개로 제한
-    if len(scenes) > max_scenes_count:
-        total_duration = scenes[-1]["end_time"] - scenes[0]["start_time"]
-        interval = total_duration / max_scenes_count
-        selected_scenes = []
-        for i in range(max_scenes_count):
-            target_time = scenes[0]["start_time"] + i * interval
-            closest_scene = min(scenes, key=lambda x: abs(x["start_time"] - target_time))
-            selected_scenes.append(closest_scene)
-        scenes = selected_scenes
+    
+    print(f"✅ 최종 선택된 장면: {len(scenes)}개 (품질 검사 통과)")
 
     embed_uri_pairs = {}
     saved_uri: Optional[str] = None
