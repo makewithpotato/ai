@@ -102,15 +102,27 @@ def download_json_from_s3(s3_uri: str) -> Dict:
     except Exception as e:
         raise e
 
-def frame_to_bytes(frame: np.ndarray) -> bytes:
+def frame_to_bytes(frame: np.ndarray, max_width: int = None) -> bytes:
     """
     OpenCV 프레임을 JPEG bytes로 변환 (PIL 사용으로 더 안정적)
+    
+    Args:
+        frame: OpenCV 프레임
+        max_width: 최대 너비 (None이면 원본 크기 유지, 지정하면 해상도 조정)
     """
     # OpenCV BGR을 RGB로 변환
     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     
     # PIL Image로 변환
     pil_image = Image.fromarray(frame_rgb)
+    
+    # 해상도 조정 (필요한 경우)
+    if max_width and pil_image.width > max_width:
+        # 비율 유지하며 리사이징
+        ratio = max_width / pil_image.width
+        new_height = int(pil_image.height * ratio)
+        pil_image = pil_image.resize((max_width, new_height), Image.LANCZOS)
+        print(f"   📐 이미지 리사이징: {frame_rgb.shape[1]}x{frame_rgb.shape[0]} → {max_width}x{new_height}")
     
     # BytesIO를 사용하여 JPEG로 인코딩
     buffer = io.BytesIO()
@@ -206,10 +218,10 @@ def detect_and_embed_scenes(video_path: str, threshold: float = 30.0, max_scenes
         print(f"   선명도: {quality_check['sharpness']:.1f} ({'✅' if quality_check['sharpness_ok'] else '❌'})")
         
         if quality_check['is_good_quality']:
-            # 프레임을 bytes로 변환 (Bedrock 전송용)
-            frame_image = frame_to_bytes(frame)
+            # 저해상도 버전 생성 (Claude/Marengo 전송용, 720p)
+            frame_image_lowres = frame_to_bytes(frame, max_width=720)
             
-            # 프레임을 복사하여 저장 (S3 저장용)
+            # 프레임을 복사하여 저장 (S3 저장용 - 원본 해상도)
             frame_copy = frame.copy()
             
             scene_data = {
@@ -217,8 +229,8 @@ def detect_and_embed_scenes(video_path: str, threshold: float = 30.0, max_scenes
                 "end_time": scene[1].get_seconds(),
                 "start_frame": scene[0].frame_num,
                 "end_frame": scene[1].frame_num,
-                "frame_image": frame_image,
-                "frame": frame_copy
+                "frame_image": frame_image_lowres,  # 저해상도 버전
+                "frame": frame_copy  # 원본 해상도 (S3 저장용)
             }
             
             scenes.append(scene_data)
