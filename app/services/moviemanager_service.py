@@ -23,6 +23,7 @@ from app.crud import (
 from app.database import SessionLocal
 import asyncio
 import numpy as np
+from app.services.claude_service import init_claude_client, bedrock_client
 
 def load_prompts(language: str = "kor") -> Dict[str, str]:
     """
@@ -303,10 +304,8 @@ async def get_bedrock_response_with_context(utterances: List[Dict], scene_images
     Returns:
         tuple[str, Dict[str, List[int]]]: (요약 텍스트, 검색어별 선택된 장면 인덱스)
     """
-    bedrock = boto3.client(
-        service_name='bedrock-runtime',
-        region_name=os.getenv("AWS_DEFAULT_REGION")
-    )
+
+    init_claude_client()
     model_id = os.getenv("CLAUDE_MODEL_ID")
 
     # 텍스트 프롬프트 생성 (Rolling Context 적용)
@@ -332,28 +331,24 @@ async def get_bedrock_response_with_context(utterances: List[Dict], scene_images
                         "data": scene["image"]
                     }
                 })
+                del scene_images[i]["image"]  # 메모리 절약을 위해 이미지 데이터 제거
     content.append({
         "type": "text",
         "text": text_prompt
     })
 
-    request_body = {
-        "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 4096,
-        "messages": [
+    response = bedrock_client.messages.create(
+        model=model_id,
+        max_tokens= 4096,
+        messages= [
             {
                 "role": "user",
                 "content": content
             }
         ]
-    }
-    
-    response = bedrock.invoke_model(
-        modelId=model_id,
-        body=json.dumps(request_body)
     )
-    response_body = json.loads(response['body'].read())
-    claude_response = response_body['content'][0]['text']
+    # Message 객체에서 content 추출
+    claude_response = response.content[0].text
     
     # 디버깅: 모델 답변 출력
     print("🤖 CLAUDE RESPONSE:")
@@ -365,7 +360,6 @@ async def get_bedrock_response_with_context(utterances: List[Dict], scene_images
     scene_selections = {}
     if retrieval_queries:
         # [SCENE_SELECTION] ... [/SCENE_SELECTION] 섹션 찾기
-        import re
         selection_match = re.search(r'\[SCENE_SELECTION\](.*?)\[/SCENE_SELECTION\]', claude_response, re.DOTALL)
         if selection_match:
             selection_text = selection_match.group(1)
