@@ -9,6 +9,8 @@ import numpy as np
 import base64
 import uuid
 import json
+from PIL import Image
+import io
 
 def match_utterances_to_scene(scene_start: float, scene_end: float, utterances: List[Dict]) -> str:
     """
@@ -100,25 +102,22 @@ def download_json_from_s3(s3_uri: str) -> Dict:
     except Exception as e:
         raise e
 
-def frame_to_base64(frame: np.ndarray, max_size_mb: float = 4.5) -> str:
+def frame_to_bytes(frame: np.ndarray) -> bytes:
     """
-    OpenCV 프레임을 base64 문자열로 변환 (간단한 버전)
+    OpenCV 프레임을 JPEG bytes로 변환 (PIL 사용으로 더 안정적)
     """
-    max_size_bytes = max_size_mb * 1024 * 1024
+    # OpenCV BGR을 RGB로 변환
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     
-    # 먼저 적절한 품질로 인코딩
-    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 90]
-    _, buffer = cv2.imencode('.jpg', frame, encode_param)
+    # PIL Image로 변환
+    pil_image = Image.fromarray(frame_rgb)
     
-    # 크기가 크면 리사이징
-    if len(buffer) > max_size_bytes:
-        height, width = frame.shape[:2]
-        scale = (max_size_bytes / len(buffer)) ** 0.5
-        new_size = (int(width * scale * 0.9), int(height * scale * 0.9))
-        resized = cv2.resize(frame, new_size, interpolation=cv2.INTER_AREA)
-        _, buffer = cv2.imencode('.jpg', resized, encode_param)
+    # BytesIO를 사용하여 JPEG로 인코딩
+    buffer = io.BytesIO()
+    pil_image.save(buffer, format='JPEG')
     
-    return base64.b64encode(buffer).decode('utf-8')
+    # bytes 반환
+    return buffer.getvalue()
 
 def save_frame_to_s3(frame: np.ndarray, prefix: str = "scenes") -> str:
     """
@@ -207,8 +206,8 @@ def detect_and_embed_scenes(video_path: str, threshold: float = 30.0, max_scenes
         print(f"   선명도: {quality_check['sharpness']:.1f} ({'✅' if quality_check['sharpness_ok'] else '❌'})")
         
         if quality_check['is_good_quality']:
-            # 프레임을 base64로 변환 (Bedrock 전송용)
-            frame_image = frame_to_base64(frame)
+            # 프레임을 bytes로 변환 (Bedrock 전송용)
+            frame_image = frame_to_bytes(frame)
             
             # 프레임을 복사하여 저장 (S3 저장용)
             frame_copy = frame.copy()
@@ -248,10 +247,13 @@ def detect_and_embed_scenes(video_path: str, threshold: float = 30.0, max_scenes
             thumbnail_url = save_thumbnail_to_s3(scene_frame, movie_id, chunk_id, scene_index + 1, original_uri)
             scene_data['thumbnail_url'] = thumbnail_url
 
-            embedded_vector = embed_marengo("image", scene_data["frame_image"])
+            # bytes를 base64로 인코딩하여 marengo에 전달
+            import base64
+            frame_image_base64 = base64.b64encode(scene_data["frame_image"]).decode('utf-8')
+            embedded_vector = embed_marengo("image", frame_image_base64)
             embed_uri_pairs[thumbnail_url] = embedded_vector
             
-            # 메모리 절약을 위해 프레임 데이터 제거
+            # 메모리 절약을 위해 프레임 데이터 제거 (frame만 제거, frame_image는 Claude에 필요)
             del scene_data['frame']
             
         except Exception as e:

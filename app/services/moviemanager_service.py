@@ -304,8 +304,6 @@ async def get_bedrock_response_with_context(utterances: List[Dict], scene_images
     Returns:
         tuple[str, Dict[str, List[int]]]: (요약 텍스트, 검색어별 선택된 장면 인덱스)
     """
-
-    init_claude_client()
     model_id = os.getenv("CLAUDE_MODEL_ID")
 
     # 텍스트 프롬프트 생성 (Rolling Context 적용)
@@ -318,37 +316,43 @@ async def get_bedrock_response_with_context(utterances: List[Dict], scene_images
     print(text_prompt)
     print("=" * 80)
 
-    # 멀티모달 메시지 구성
+    # 멀티모달 메시지 구성 (Converse API 형식)
     content = []
     if scene_images:
         for i, scene in enumerate(scene_images):
             if scene and scene.get("image"):
+                # 이미 bytes 형태로 전달됨
                 content.append({
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "image/jpeg",
-                        "data": scene["image"]
+                    "image": {
+                        "format": "jpeg",
+                        "source": {
+                            "bytes": scene["image"]
+                        }
                     }
                 })
                 del scene_images[i]["image"]  # 메모리 절약을 위해 이미지 데이터 제거
     content.append({
-        "type": "text",
         "text": text_prompt
     })
 
-    response = bedrock_client.messages.create(
-        model=model_id,
-        max_tokens= 4096,
-        messages= [
+    # Bedrock Converse API 사용
+    bedrock = boto3.client('bedrock-runtime', region_name=os.getenv("AWS_DEFAULT_REGION"))
+    
+    response = bedrock.converse(
+        modelId=model_id,
+        messages=[
             {
                 "role": "user",
                 "content": content
             }
-        ]
+        ],
+        inferenceConfig={
+            "maxTokens": 4096
+        }
     )
-    # Message 객체에서 content 추출
-    claude_response = response.content[0].text
+    
+    # Converse API 응답에서 텍스트 추출
+    claude_response = response['output']['message']['content'][0]['text']
     
     # 디버깅: 모델 답변 출력
     print("🤖 CLAUDE RESPONSE:")
